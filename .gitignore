@@ -1,0 +1,16 @@
+# Synthetic-run exports and any other generated artifacts (not for version control).
+output/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.venv312/
+.pytest_cache/
+.ruff_cache/
+
+# Local secrets / env
+.env
+
+# macOS
+.DS_Store

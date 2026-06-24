@@ -1,0 +1,44 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: alik
+      POSTGRES_PASSWORD: alik
+      POSTGRES_DB: alik
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alik"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # Phase 2: temporal graph. Redis-family, but its own service so Phase 1's Redis
+  # is untouched. Host 6380 -> container 6379 to avoid clashing with `redis`.
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6380:6379"
+    volumes:
+      - falkordata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:
+  falkordata:
