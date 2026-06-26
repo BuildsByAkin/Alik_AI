@@ -1,0 +1,41 @@
+[project]
+name = "alik-auth-service"
+version = "0.1.0"
+description = "alik Auth + User Profile microservice — Supabase-backed, standalone (port 8001)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic[email]>=2.9",
+    "pydantic-settings>=2.5",
+    "python-multipart>=0.0.12",
+    "supabase>=2.9",
+    "uvicorn[standard]>=0.32",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auth_service"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# B008: FastAPI's Depends()/File() in argument defaults is the framework's intended pattern.
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
