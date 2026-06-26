@@ -17,9 +17,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from alik.config import Settings
+from alik.job_matcher import Job, load_catalog, match_jobs_for_user
 from alik.llm import LLMClient
 from alik.memory.graph import GraphMemory
-from alik.models import InferredTrait, TraitStatus
+from alik.models import CheckinType, InferredTrait, JobOutcome, PendingCheckin, TraitStatus
 from alik.prompt import (
     COMMITMENT_CONSOLIDATE_SYSTEM,
     CONSOLIDATE_SYSTEM,
@@ -53,6 +54,8 @@ class UserReport:
     traits_pruned: int = 0  # stale inferred traits closed this run
     commitments_consolidated: int = 0  # cross-key duplicate commitments merged this run
     commitments_ticked: int = 0  # commitments advanced pending -> due this run
+    job_followups_queued: int = 0  # Phase 7: job follow-up check-ins queued this run
+    jobs_matched: int = 0  # Phase 7: job recommendations queued this run
 
 
 async def promote(
@@ -198,10 +201,107 @@ async def tick_commitments(memory: GraphMemory, user_id: str, settings: Settings
     return ticked
 
 
+async def check_job_followups(memory: GraphMemory, catalog: list[Job], user_id: str) -> int:
+    """Phase 7 (runs before match_jobs): if a delivered recommendation is past its 3-day
+    follow_up_after with no follow-up yet, queue a ``job_followup`` check-in so the companion
+    asks how it went. Respects the one-undelivered-check-in-per-user rule. Returns 0/1."""
+    if await memory.get_pending_checkin(user_id) is not None:
+        return 0
+    rec = await memory.get_due_job_followup(user_id)
+    if rec is None:
+        return 0
+    job = next((j for j in catalog if j.id == rec.job_id), None)
+    title = job.title if job is not None else "that opportunity"
+    partner = f" ({job.partner})" if job is not None else ""
+    hint = (
+        f"Check in warmly on how the '{title}' work{partner} went for them — ask how they "
+        "FEEL about it, not just whether they did it."
+    )
+    await memory.queue_checkin(
+        PendingCheckin(user_id=user_id, checkin_type=CheckinType.JOB_FOLLOWUP, message_hint=hint)
+    )
+    await memory.mark_job_followup_sent(rec.id)
+    return 1
+
+
+async def match_jobs(
+    memory: GraphMemory, catalog: list[Job], user_id: str, settings: Settings
+) -> int:
+    """Phase 7: quietly surface relevant paid work from what the graph already knows.
+
+    One open job thread per user: skips entirely while a recommendation is unresolved, or
+    while in a post-outcome cooldown (disliked → 14d, not_tried → 7d). Never the same job
+    twice; never a disliked partner again. Queues at most one ``job_recommendation`` check-in
+    (and respects the one-check-in-per-user rule). Deterministic — no model call. Returns 0/1.
+    """
+    if await memory.get_pending_checkin(user_id) is not None:
+        return 0
+
+    recs = await memory.get_job_recommendations(user_id)  # newest first
+    # An open thread (queued or awaiting an outcome) blocks any new recommendation.
+    if any(r.outcome is None for r in recs):
+        return 0
+
+    now = datetime.now(UTC)
+    if recs:
+        latest = recs[0]  # most recent resolved thread
+        # Cooldown anchored on when we asked (~ when the outcome was set); fall back to
+        # the recommendation time if no follow-up was recorded.
+        anchor = latest.follow_up_sent_at or latest.recommended_at
+        if latest.outcome is JobOutcome.TRIED_DISLIKED and now - anchor < timedelta(
+            days=settings.job_disliked_cooldown_days
+        ):
+            return 0
+        if latest.outcome is JobOutcome.NOT_TRIED and now - anchor < timedelta(
+            days=settings.job_not_tried_cooldown_days
+        ):
+            return 0
+
+    # Never re-suggest a partner the user tried and disliked.
+    disliked_job_ids = {r.job_id for r in recs if r.outcome is JobOutcome.TRIED_DISLIKED}
+    by_id = {j.id: j for j in catalog}
+    excluded_partners = {by_id[jid].partner for jid in disliked_job_ids if jid in by_id}
+
+    facts = await memory.get_current_facts(user_id)
+    traits = await memory.get_current_traits(user_id)  # match filters to CONFIRMED itself
+    already = await memory.get_recommended_job_ids(user_id)
+
+    job = match_jobs_for_user(
+        user_id,
+        facts,
+        traits,
+        catalog,
+        already,
+        threshold=settings.job_match_threshold,
+        excluded_partners=excluded_partners,
+    )
+    if job is None:
+        return 0
+
+    hint = (
+        f'You spotted some paid work that might suit them: "{job.title}" with {job.partner}, '
+        f"paying {job.pay_range}. Mention it warmly, like a friend who noticed an opportunity — "
+        f"not an ad — and offer to share the link: {job.partner_url}"
+    )
+    await memory.queue_checkin(
+        PendingCheckin(
+            user_id=user_id, checkin_type=CheckinType.JOB_RECOMMENDATION, message_hint=hint
+        )
+    )
+    await memory.log_job_recommendation(
+        user_id, job.id, follow_up_after_days=settings.job_followup_after_days
+    )
+    return 1
+
+
 async def run_for_user(
-    memory: GraphMemory, llm: LLMClient, user_id: str, settings: Settings
+    memory: GraphMemory,
+    llm: LLMClient,
+    user_id: str,
+    settings: Settings,
+    catalog: list[Job] | None = None,
 ) -> UserReport:
-    """Run all six passes for one user. Each pass is isolated; a failure is logged."""
+    """Run every pass for one user. Each pass is isolated; a failure is logged."""
     report = UserReport(user_id=user_id)
     try:
         report.promoted = await promote(memory, llm, user_id, settings)
@@ -243,6 +343,15 @@ async def run_for_user(
         report.commitments_ticked = await tick_commitments(memory, user_id, settings)
     except Exception:
         logger.exception("TICK_COMMITMENTS failed for user %s", user_id)
+    if catalog is not None:
+        try:
+            report.job_followups_queued = await check_job_followups(memory, catalog, user_id)
+        except Exception:
+            logger.exception("CHECK_JOB_FOLLOWUPS failed for user %s", user_id)
+        try:
+            report.jobs_matched = await match_jobs(memory, catalog, user_id, settings)
+        except Exception:
+            logger.exception("MATCH_JOBS failed for user %s", user_id)
     return report
 
 
@@ -253,10 +362,19 @@ async def run(memory: GraphMemory, llm: LLMClient, settings: Settings) -> list[U
     except Exception:
         logger.exception("sleep pass: could not list active users")
         return []
+    # Load the job catalog once for the whole run; a bad/missing file disables the job
+    # passes for this run rather than crashing it.
+    catalog: list[Job] | None = None
+    if settings.job_match_enabled:
+        try:
+            catalog = load_catalog(settings.job_catalog_path)
+        except Exception:
+            logger.exception("job catalog load failed — job passes disabled this run")
+            catalog = None
     reports: list[UserReport] = []
     for user_id in users:
         try:
-            reports.append(await run_for_user(memory, llm, user_id, settings))
+            reports.append(await run_for_user(memory, llm, user_id, settings, catalog))
         except Exception:
             logger.exception("sleep pass failed for user %s", user_id)
     logger.info("sleep pass complete: %d users processed", len(reports))
@@ -337,7 +455,8 @@ async def _main() -> None:
                 f"reflection={'yes' if r.reflection else 'no'} "
                 f"traits={len(r.traits_detected)} consolidated={r.traits_consolidated} "
                 f"pruned={r.traits_pruned} commitments_merged={r.commitments_consolidated} "
-                f"commitments_due={r.commitments_ticked}"
+                f"commitments_due={r.commitments_ticked} "
+                f"job_followups={r.job_followups_queued} jobs_matched={r.jobs_matched}"
             )
     finally:
         await memory.aclose()

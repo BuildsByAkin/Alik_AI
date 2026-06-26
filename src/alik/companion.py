@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -15,9 +16,11 @@ from alik.extraction import Extractor
 from alik.llm import LLMClient
 from alik.memory.base import Memory
 from alik.models import (
+    CheckinType,
     CommitmentNode,
     GraphNode,
     InferredTrait,
+    JobOutcome,
     MemoryRecord,
     MemoryTier,
     NodeType,
@@ -26,14 +29,17 @@ from alik.models import (
 )
 from alik.prompt import (
     COMMITMENT_RESOLVE_SYSTEM,
+    JOB_OUTCOME_CLASSIFY_SYSTEM,
     REFLECT_BACK_SYSTEM,
     RESPONSE_CLASSIFY_SYSTEM,
     SUMMARY_SYSTEM,
     build_classify_request,
+    build_job_outcome_request,
     build_reflect_back_request,
     build_resolve_request,
     build_system_prompt,
     parse_classification,
+    parse_job_outcome,
     parse_resolution,
     to_messages,
     transcript_for_summary,
@@ -78,6 +84,9 @@ class Companion:
         self._checkin_opened: set[str] = set()  # sessions that already delivered an opener
         self._checkin_commitment: dict[str, CommitmentNode] = {}  # session -> commitment to resolve
         self._checkin_grace: dict[str, int] = {}  # session -> remaining "unclear" turns
+        # Phase 7 job-checkin state (same in-process carve-out). session -> dict with
+        # {"type": "recommendation"|"followup", "url": str|None, "rec_id": str|None}.
+        self._job_checkin: dict[str, dict] = {}
 
     async def respond(self, user_id: str, session_id: str, user_message: str) -> AsyncIterator[str]:
         """Stream a reply, appending both turns to the live buffer."""
@@ -102,6 +111,11 @@ class Companion:
         if pending is not None:
             await self._handle_reflect_back_response(user_id, session_id, pending, user_message)
 
+        # If a job recommendation/follow-up is open, this message is their reply to it.
+        job_directive: str | None = None
+        if session_id in self._job_checkin:
+            job_directive = await self._handle_job_response(user_id, session_id, user_message)
+
         ctx = await self._memory.retrieve(user_id, session_id, episode_limit=self._episode_limit)
         system = build_system_prompt(
             self._persona,
@@ -111,6 +125,8 @@ class Companion:
             reflection=ctx.reflection,
             traits=ctx.traits,
         )
+        if job_directive:
+            system += f"\n\n{job_directive}"
 
         # Reflect-back: at most once per session, never in the first 3 completed turns.
         question = await self._maybe_reflect_back(user_id, session_id, ctx.working)
@@ -268,12 +284,7 @@ class Companion:
         self._checkin_opened.add(session_id)
 
         ctx = await self._memory.retrieve(user_id, session_id, episode_limit=self._episode_limit)
-        directive = (
-            "Open this conversation yourself — warm and brief — in the spirit of this "
-            f'private note to yourself: "{checkin.message_hint}". Do not mention that '
-            "this was scheduled or automated, and ask how they are FEELING about it, "
-            "never whether they did it."
-        )
+        directive = self._opening_directive(checkin.checkin_type, checkin.message_hint)
         system = build_system_prompt(
             self._persona,
             ctx.episodes,
@@ -305,7 +316,156 @@ class Companion:
             if match is not None:
                 self._checkin_commitment[session_id] = match
                 self._checkin_grace[session_id] = 1  # first turn + one "unclear" grace turn
+        # Phase 7: set up job-checkin state so the user's next turn is handled.
+        if checkin.checkin_type is CheckinType.JOB_RECOMMENDATION:
+            await self._setup_job_recommendation(user_id, session_id, checkin.message_hint)
+        elif checkin.checkin_type is CheckinType.JOB_FOLLOWUP:
+            await self._setup_job_followup(user_id, session_id)
         return opener
+
+    # --- Phase 7: job recommendation delivery + lifecycle ---------------------
+
+    @staticmethod
+    def _opening_directive(checkin_type: CheckinType, hint: str) -> str:
+        """Choose the opener brief for a queued check-in — warmer for job types."""
+        if checkin_type is CheckinType.JOB_RECOMMENDATION:
+            return (
+                "Open this conversation yourself, warmly, like a friend who just spotted an "
+                "opportunity for them — never like an ad. In one or two natural sentences, "
+                "mention it based on what you know about them, include the pay range, and then "
+                'offer to share the link by ending with: "Want me to send you the link?" Work '
+                f'from this private note to yourself: "{hint}". Never mention that this was '
+                "scheduled or automated."
+            )
+        if checkin_type is CheckinType.JOB_FOLLOWUP:
+            return (
+                "Open this conversation yourself — warm and brief — and ask how that opportunity "
+                "went for them: how they FEEL about it, not just whether they did it. Work from "
+                f'this private note to yourself: "{hint}". Never mention that this was scheduled '
+                "or automated."
+            )
+        return (
+            "Open this conversation yourself — warm and brief — in the spirit of this "
+            f'private note to yourself: "{hint}". Do not mention that this was scheduled '
+            "or automated, and ask how they are FEELING about it, never whether they did it."
+        )
+
+    async def _setup_job_recommendation(self, user_id: str, session_id: str, hint: str) -> None:
+        """Mark the open recommendation delivered (so the 3-day follow-up can fire) and stash
+        the link so a 'yes' next turn can share it. URL travels inside the hint."""
+        recs = await self._memory.get_job_recommendations(user_id)
+        open_rec = next((r for r in recs if r.outcome is None and r.delivered_at is None), None)
+        if open_rec is not None:
+            await self._memory.mark_job_recommendation_delivered(open_rec.id)
+        self._job_checkin[session_id] = {
+            "type": "recommendation",
+            "url": self._extract_url(hint),
+            "rec_id": open_rec.id if open_rec is not None else None,
+        }
+
+    async def _setup_job_followup(self, user_id: str, session_id: str) -> None:
+        rec = await self._memory.get_pending_job_followup(user_id)
+        self._job_checkin[session_id] = {
+            "type": "followup",
+            "url": None,
+            "rec_id": rec.id if rec is not None else None,
+        }
+
+    @staticmethod
+    def _extract_url(text: str) -> str | None:
+        match = re.search(r"https?://\S+", text)
+        return match.group(0).rstrip('.,;:")') if match else None
+
+    @staticmethod
+    def _is_affirmative(message: str) -> bool:
+        """Lightweight yes/no read for the link offer (a binary — no model call needed)."""
+        m = message.lower()
+        negatives = ("no", "nope", "nah", "not now", "later", "skip", "don't", "do not")
+        if any(n in m for n in negatives):
+            return False
+        positives = ("yes", "yeah", "yep", "sure", "please", "ok", "okay", "send", "link", "go")
+        return any(p in m for p in positives)
+
+    async def _handle_job_response(
+        self, user_id: str, session_id: str, user_message: str
+    ) -> str | None:
+        """Handle the user's reply to an open job recommendation or follow-up.
+
+        Returns an optional one-turn system directive (share the link / ask why), or None.
+        Always clears the per-session job state — these are single-shot exchanges.
+        """
+        state = self._job_checkin.pop(session_id, None)
+        if state is None:
+            return None
+
+        if state["type"] == "recommendation":
+            # 'yes' → share the link; 'no'/ignore → drop quietly (already logged).
+            if state.get("url") and self._is_affirmative(user_message):
+                return (
+                    "The person said yes to the link. Share it warmly and naturally in your "
+                    f"reply: {state['url']}"
+                )
+            return None
+
+        # follow-up: classify the outcome and apply side effects.
+        try:
+            raw = await self._llm.complete(
+                system=JOB_OUTCOME_CLASSIFY_SYSTEM,
+                messages=build_job_outcome_request(user_message),
+            )
+        except Exception:
+            logger.exception("job follow-up: outcome classify failed")
+            return None
+        outcome = parse_job_outcome(raw)
+        if outcome is None:
+            return None  # leave the thread open; don't guess
+        rec_id = state.get("rec_id")
+        if rec_id is not None:
+            await self._memory.update_job_outcome(rec_id, outcome)
+        await self._apply_job_outcome(user_id, session_id, outcome)
+        if outcome is JobOutcome.NOT_TRIED:
+            return (
+                "They haven't tried it yet. In one warm, natural sentence, gently ask what's "
+                "been holding them back — no pressure."
+            )
+        return None
+
+    async def _apply_job_outcome(self, user_id: str, session_id: str, outcome: JobOutcome) -> None:
+        """Side effects of a classified outcome: activate the thread + feed the pattern layer."""
+        if outcome in (JobOutcome.TRIED_LIKED, JobOutcome.LOVED_IT):
+            await self._memory.set_job_active(user_id, True)
+            await self._write_job_signal(
+                user_id,
+                session_id,
+                "follow_through",
+                "Followed through on paid work alik suggested and it went well.",
+            )
+        elif outcome is JobOutcome.TRIED_DISLIKED:
+            await self._write_job_signal(
+                user_id,
+                session_id,
+                "job_category_disliked",
+                "Tried paid work alik suggested and did not enjoy that kind of work.",
+            )
+
+    async def _write_job_signal(
+        self, user_id: str, session_id: str, key: str, content: str
+    ) -> None:
+        """Append an EmotionalSignal the nightly detect() can fold in (graph-only; duck-typed)."""
+        if not hasattr(self._memory, "write_nodes"):
+            return
+        await self._memory.write_nodes(
+            [
+                GraphNode(
+                    user_id=user_id,
+                    type=NodeType.EMOTIONAL_SIGNAL,
+                    key=key,
+                    content=content,
+                    valid_from=datetime.now(UTC),
+                    source_session_id=session_id,
+                )
+            ]
+        )
 
     def _clear_checkin(self, session_id: str) -> None:
         self._checkin_commitment.pop(session_id, None)

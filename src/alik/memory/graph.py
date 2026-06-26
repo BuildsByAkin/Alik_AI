@@ -30,6 +30,8 @@ from alik.models import (
     CommitmentStatus,
     GraphNode,
     InferredTrait,
+    JobOutcome,
+    JobRecommendation,
     MemoryRecord,
     NodeType,
     PendingCheckin,
@@ -644,6 +646,42 @@ class GraphMemory(Memory):
 
     async def decrement_reflect_back_cooldown(self, user_id: str) -> None:
         await self._base.decrement_reflect_back_cooldown(user_id)
+
+    # --- Phase 7: earn / job-matching log (Postgres — delegate to base) -------
+
+    async def log_job_recommendation(
+        self, user_id: str, job_id: str, *, follow_up_after_days: int
+    ) -> str:
+        return await self._base.log_job_recommendation(
+            user_id, job_id, follow_up_after_days=follow_up_after_days
+        )
+
+    async def get_recommended_job_ids(self, user_id: str) -> list[str]:
+        return await self._base.get_recommended_job_ids(user_id)
+
+    async def get_job_recommendations(self, user_id: str) -> list[JobRecommendation]:
+        return await self._base.get_job_recommendations(user_id)
+
+    async def mark_job_recommendation_delivered(self, rec_id: str) -> None:
+        await self._base.mark_job_recommendation_delivered(rec_id)
+
+    async def get_due_job_followup(self, user_id: str) -> JobRecommendation | None:
+        return await self._base.get_due_job_followup(user_id)
+
+    async def mark_job_followup_sent(self, rec_id: str) -> None:
+        await self._base.mark_job_followup_sent(rec_id)
+
+    async def get_pending_job_followup(self, user_id: str) -> JobRecommendation | None:
+        return await self._base.get_pending_job_followup(user_id)
+
+    async def update_job_outcome(self, rec_id: str, outcome: JobOutcome) -> None:
+        await self._base.update_job_outcome(rec_id, outcome)
+
+    async def set_job_active(self, user_id: str, active: bool = True) -> None:
+        await self._base.set_job_active(user_id, active)
+
+    async def get_job_active(self, user_id: str) -> bool:
+        return await self._base.get_job_active(user_id)
 
     async def _current(self, user_id: str, node_type: NodeType) -> list[GraphNode]:
         if self._graph is None:

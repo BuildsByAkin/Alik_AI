@@ -26,6 +26,8 @@ from alik.models import (
     CommitmentStatus,
     GraphNode,
     InferredTrait,
+    JobOutcome,
+    JobRecommendation,
     MemoryRecord,
     MemoryTier,
     NodeType,
@@ -112,6 +114,8 @@ class InMemoryMemory(Memory):
         self._reflections: dict[str, list[dict]] = {}
         self._checkins: list[PendingCheckin] = []  # Phase 5 queue
         self._rb_cooldown: dict[str, int] = {}  # Phase 5.2 reflect-back cadence
+        self._job_recs: list[JobRecommendation] = []  # Phase 7 recommendation log
+        self._job_active: dict[str, bool] = {}  # Phase 7 per-user engagement flag
         self._reflection_after_days = reflection_after_days
 
     def _to_record(self, user_id: str, ep: dict) -> MemoryRecord:
@@ -179,6 +183,8 @@ class InMemoryMemory(Memory):
         self._reflections.pop(user_id, None)
         self._checkins = [c for c in self._checkins if c.user_id != user_id]
         self._rb_cooldown.pop(user_id, None)
+        self._job_recs = [r for r in self._job_recs if r.user_id != user_id]
+        self._job_active.pop(user_id, None)
         for key in [k for k in self._working if k[0] == user_id]:
             self._working.pop(key, None)
 
@@ -211,6 +217,72 @@ class InMemoryMemory(Memory):
 
     async def decrement_reflect_back_cooldown(self, user_id: str) -> None:
         self._rb_cooldown[user_id] = max(0, self._rb_cooldown.get(user_id, 0) - 1)
+
+    # --- Phase 7: earn / job-matching log ---------------------------------
+
+    def _user_recs(self, user_id: str) -> list[JobRecommendation]:
+        recs = [r for r in self._job_recs if r.user_id == user_id]
+        recs.sort(key=lambda r: r.recommended_at, reverse=True)
+        return recs
+
+    async def log_job_recommendation(
+        self, user_id: str, job_id: str, *, follow_up_after_days: int
+    ) -> str:
+        now = datetime.now(UTC)
+        rec = JobRecommendation(
+            user_id=user_id,
+            job_id=job_id,
+            recommended_at=now,
+            follow_up_after=now + timedelta(days=follow_up_after_days),
+        )
+        self._job_recs.append(rec)
+        return rec.id
+
+    async def get_recommended_job_ids(self, user_id: str) -> list[str]:
+        return list({r.job_id for r in self._job_recs if r.user_id == user_id})
+
+    async def get_job_recommendations(self, user_id: str) -> list[JobRecommendation]:
+        return self._user_recs(user_id)
+
+    def _replace_rec(self, rec_id: str, **changes) -> None:
+        self._job_recs = [replace(r, **changes) if r.id == rec_id else r for r in self._job_recs]
+
+    async def mark_job_recommendation_delivered(self, rec_id: str) -> None:
+        self._replace_rec(rec_id, delivered_at=datetime.now(UTC))
+
+    async def get_due_job_followup(self, user_id: str) -> JobRecommendation | None:
+        now = datetime.now(UTC)
+        due = [
+            r
+            for r in self._user_recs(user_id)
+            if r.delivered_at is not None
+            and r.follow_up_after is not None
+            and r.follow_up_after < now
+            and r.follow_up_sent_at is None
+            and r.outcome is None
+        ]
+        due.sort(key=lambda r: r.recommended_at)
+        return due[0] if due else None
+
+    async def mark_job_followup_sent(self, rec_id: str) -> None:
+        self._replace_rec(rec_id, follow_up_sent_at=datetime.now(UTC))
+
+    async def get_pending_job_followup(self, user_id: str) -> JobRecommendation | None:
+        pending = [
+            r
+            for r in self._user_recs(user_id)
+            if r.follow_up_sent_at is not None and r.outcome is None
+        ]
+        return pending[0] if pending else None
+
+    async def update_job_outcome(self, rec_id: str, outcome: JobOutcome) -> None:
+        self._replace_rec(rec_id, outcome=outcome)
+
+    async def set_job_active(self, user_id: str, active: bool = True) -> None:
+        self._job_active[user_id] = active
+
+    async def get_job_active(self, user_id: str) -> bool:
+        return self._job_active.get(user_id, False)
 
     # --- Phase 3 ----------------------------------------------------------
 

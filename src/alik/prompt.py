@@ -13,6 +13,7 @@ from alik.models import (
     ExtractionResult,
     GraphNode,
     InferredTrait,
+    JobOutcome,
     MemoryRecord,
     NodeType,
     ProvenanceRecord,
@@ -159,8 +160,7 @@ def transcript_for_extraction(
     if open_commitments:
         tracked = "\n".join(f"[{c.key}] {c.content}" for c in open_commitments)
         content += (
-            "\n\nCommitments already tracked (reuse the EXACT key for the same intent):\n"
-            f"{tracked}"
+            f"\n\nCommitments already tracked (reuse the EXACT key for the same intent):\n{tracked}"
         )
     return [{"role": "user", "content": content}]
 
@@ -706,6 +706,43 @@ def parse_classification(raw: str) -> tuple[str, str | None]:
     if classification != "correct":
         correction_text = None
     return classification, correction_text
+
+
+# --- Phase 7: job recommendation follow-up classification --------------------
+
+JOB_OUTCOME_CLASSIFY_SYSTEM = (
+    "You earlier suggested a paid work opportunity to the person and are now following up. "
+    "Classify their reply into exactly one of: tried_liked (they tried it and liked it), "
+    "loved_it (they tried it and loved it / it's going great), tried_disliked (they tried "
+    "it and didn't like it), not_tried (they haven't tried it). If it's ambiguous, choose "
+    'not_tried. Return ONLY JSON: {"outcome": "tried_liked|loved_it|tried_disliked|not_tried"}.'
+)
+
+
+def build_job_outcome_request(user_message: str) -> list[dict]:
+    """Wrap the user's follow-up reply for outcome classification."""
+    return [{"role": "user", "content": f"Their reply: {user_message}"}]
+
+
+def parse_job_outcome(raw: str) -> JobOutcome | None:
+    """Parse the classifier's JSON into a ``JobOutcome``, or None on any failure.
+
+    None is the safe no-op: we leave the thread open rather than guess an outcome.
+    """
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = str(data.get("outcome", "")).strip().lower()
+    try:
+        return JobOutcome(value)
+    except ValueError:
+        return None
 
 
 # --- Phase 5: proactivity prompts --------------------------------------------
