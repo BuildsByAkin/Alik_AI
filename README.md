@@ -10,6 +10,20 @@ come back days later, and it recalls earlier conversations without being reminde
 
 See `CLAUDE.md` for the golden rules and the full phase map.
 
+## Services
+
+alik is split into independent services, each on its own port:
+
+| Service | Dir | Port | Backed by | Purpose |
+|---|---|---|---|---|
+| Companion brain API | `src/alik/` | **8000** | Postgres + Redis + FalkorDB (docker-compose) | the text-in/text-out brain (memory, patterns, commitments, proactivity) |
+| Auth + User Profile | `services/auth/` | **8001** | Supabase (auth + Postgres + storage) | email/password auth and the user profile (name, age, city, photo) |
+
+`services/auth/` is a **standalone microservice** — its own `pyproject.toml`, venv, and
+datastore. It does not import or share anything with the brain. See
+[`services/auth/README.md`](services/auth/README.md) for its setup, schema SQL, and
+endpoints. The brain on port 8000 is documented below.
+
 ## How it works
 
 ```

@@ -13,7 +13,15 @@ import asyncpg
 import redis.asyncio as redis
 
 from alik.memory.base import Memory
-from alik.models import CheckinType, MemoryRecord, MemoryTier, PendingCheckin, RetrievedContext
+from alik.models import (
+    CheckinType,
+    JobOutcome,
+    JobRecommendation,
+    MemoryRecord,
+    MemoryTier,
+    PendingCheckin,
+    RetrievedContext,
+)
 
 
 def _working_key(user_id: str, session_id: str) -> str:
@@ -181,6 +189,8 @@ class PgRedisMemory(Memory):
             await conn.execute("DELETE FROM reflections WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM pending_checkins WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM reflect_back_cooldown WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM job_recommendations_log WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM user_job_state WHERE user_id = $1", user_id)
 
     # --- Phase 3: episodic lifecycle ------------------------------------------
 
@@ -337,3 +347,112 @@ class PgRedisMemory(Memory):
                 "WHERE user_id = $1",
                 user_id,
             )
+
+    # --- Phase 7: earn / job-matching log -------------------------------------
+
+    _JOBREC_COLS = (
+        "id, user_id, job_id, recommended_at, delivered_at, "
+        "follow_up_after, follow_up_sent_at, outcome"
+    )
+
+    @staticmethod
+    def _job_rec(row: asyncpg.Record) -> JobRecommendation:
+        return JobRecommendation(
+            user_id=row["user_id"],
+            job_id=row["job_id"],
+            recommended_at=row["recommended_at"],
+            delivered_at=row["delivered_at"],
+            follow_up_after=row["follow_up_after"],
+            follow_up_sent_at=row["follow_up_sent_at"],
+            outcome=JobOutcome(row["outcome"]) if row["outcome"] else None,
+            id=str(row["id"]),
+        )
+
+    async def log_job_recommendation(
+        self, user_id: str, job_id: str, *, follow_up_after_days: int
+    ) -> str:
+        async with self._pool.acquire() as conn:
+            rec_id = await conn.fetchval(
+                "INSERT INTO job_recommendations_log (user_id, job_id, follow_up_after) "
+                "VALUES ($1, $2, now() + ($3 || ' days')::interval) RETURNING id",
+                user_id,
+                job_id,
+                str(follow_up_after_days),
+            )
+        return str(rec_id)
+
+    async def get_recommended_job_ids(self, user_id: str) -> list[str]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT job_id FROM job_recommendations_log WHERE user_id = $1", user_id
+            )
+        return [r["job_id"] for r in rows]
+
+    async def get_job_recommendations(self, user_id: str) -> list[JobRecommendation]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT {self._JOBREC_COLS} FROM job_recommendations_log "
+                "WHERE user_id = $1 ORDER BY recommended_at DESC",
+                user_id,
+            )
+        return [self._job_rec(r) for r in rows]
+
+    async def mark_job_recommendation_delivered(self, rec_id: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE job_recommendations_log SET delivered_at = now() "
+                "WHERE id = $1::uuid AND delivered_at IS NULL",
+                rec_id,
+            )
+
+    async def get_due_job_followup(self, user_id: str) -> JobRecommendation | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT {self._JOBREC_COLS} FROM job_recommendations_log "
+                "WHERE user_id = $1 AND delivered_at IS NOT NULL AND follow_up_after < now() "
+                "AND follow_up_sent_at IS NULL AND outcome IS NULL "
+                "ORDER BY recommended_at ASC LIMIT 1",
+                user_id,
+            )
+        return self._job_rec(row) if row is not None else None
+
+    async def mark_job_followup_sent(self, rec_id: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE job_recommendations_log SET follow_up_sent_at = now() WHERE id = $1::uuid",
+                rec_id,
+            )
+
+    async def get_pending_job_followup(self, user_id: str) -> JobRecommendation | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT {self._JOBREC_COLS} FROM job_recommendations_log "
+                "WHERE user_id = $1 AND follow_up_sent_at IS NOT NULL AND outcome IS NULL "
+                "ORDER BY recommended_at DESC LIMIT 1",
+                user_id,
+            )
+        return self._job_rec(row) if row is not None else None
+
+    async def update_job_outcome(self, rec_id: str, outcome: JobOutcome) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE job_recommendations_log SET outcome = $2 WHERE id = $1::uuid",
+                rec_id,
+                str(outcome),
+            )
+
+    async def set_job_active(self, user_id: str, active: bool = True) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO user_job_state (user_id, job_active) VALUES ($1, $2) "
+                "ON CONFLICT (user_id) DO UPDATE SET job_active = $2",
+                user_id,
+                active,
+            )
+
+    async def get_job_active(self, user_id: str) -> bool:
+        async with self._pool.acquire() as conn:
+            val = await conn.fetchval(
+                "SELECT job_active FROM user_job_state WHERE user_id = $1", user_id
+            )
+        return bool(val)

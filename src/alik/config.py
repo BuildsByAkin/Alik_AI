@@ -55,5 +55,13 @@ class Settings(BaseSettings):
     proactivity_upcoming_hours: int = 24  # heads-up window for commitments coming due.
     proactivity_interval_hours: int = 1  # scheduler: how often the proactivity engine runs.
 
+    # Earn / job matching (Phase 7).
+    job_catalog_path: str = "data/jobs.json"  # source-of-truth catalog; add a job = add JSON.
+    job_match_threshold: float = 0.5  # MATCH: minimum specific-job score to recommend.
+    job_match_enabled: bool = True  # false disables both job passes with no code change.
+    job_followup_after_days: int = 3  # wait this long after delivery before following up.
+    job_disliked_cooldown_days: int = 14  # after tried_disliked, recommend nothing for N days.
+    job_not_tried_cooldown_days: int = 7  # after not_tried, wait N days then a different category.
+
     # Optional persona override; falls back to the packaged persona.txt.
     persona_path: str | None = None

@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS pending_checkins (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id       text        NOT NULL,
     commitment_id text,                     -- null = non-commitment check-in
-    checkin_type  text        NOT NULL,     -- due_commitment | upcoming_commitment | general_checkin
+    checkin_type  text        NOT NULL,     -- due_commitment | upcoming_commitment | general_checkin | job_recommendation | job_followup
     message_hint  text        NOT NULL,     -- what the companion should open with
     created_at    timestamptz NOT NULL DEFAULT now(),
     delivered_at  timestamptz               -- null = not yet delivered
@@ -50,6 +50,34 @@ CREATE INDEX IF NOT EXISTS idx_checkins_user_delivered
 CREATE TABLE IF NOT EXISTS reflect_back_cooldown (
     user_id   text PRIMARY KEY,
     remaining int  NOT NULL DEFAULT 0
+);
+
+-- Phase 7 (earn/job matching): one row per job recommendation delivered to a user.
+-- Lifecycle is one OPEN thread per user — a row with outcome IS NULL blocks new
+-- recommendations until it resolves. follow_up_after schedules the 3-day check-back;
+-- follow_up_sent_at marks the follow-up check-in as queued; outcome is set from the
+-- user's follow-up reply (tried_liked | tried_disliked | not_tried | loved_it).
+CREATE TABLE IF NOT EXISTS job_recommendations_log (
+    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          text        NOT NULL,
+    job_id           text        NOT NULL,
+    recommended_at   timestamptz NOT NULL DEFAULT now(),
+    delivered_at     timestamptz,            -- null = queued but not yet shown
+    follow_up_after  timestamptz,            -- when the 3-day follow-up becomes eligible
+    follow_up_sent_at timestamptz,           -- null = follow-up not yet queued
+    outcome          text                    -- null = open thread; set at follow-up
+);
+
+-- Dedup (never recommend the same job twice) + newest-first lookups per user.
+CREATE INDEX IF NOT EXISTS idx_jobrec_user_job ON job_recommendations_log (user_id, job_id);
+CREATE INDEX IF NOT EXISTS idx_jobrec_user_recommended
+    ON job_recommendations_log (user_id, recommended_at DESC);
+
+-- Phase 7: per-user job engagement flag (the brain has no user-profile table — profiles
+-- live in the separate auth service). Set true once a user tries a recommendation and likes it.
+CREATE TABLE IF NOT EXISTS user_job_state (
+    user_id    text PRIMARY KEY,
+    job_active boolean NOT NULL DEFAULT false
 );
 
 -- Phase 5 (commitment lifecycle) lives in FalkorDB (schemaless), documented here:

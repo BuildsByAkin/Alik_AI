@@ -1,0 +1,82 @@
+{
+  "_comment": "alik job catalog (Phase 7). Manually curated, not scraped — this file is the source of truth; add a job by adding an object here, no code change. MATCHING: required_fact_values is OR-semantics — a job's fact requirement is satisfied when ANY listed key has a CURRENT fact (valid_until IS NULL) whose content CONTAINS one of the listed substrings (case-insensitive). required_facts (key presence) and required_traits are also hard gates; any specified-and-failing gate scores the job 0.0. requires_any_confirmed_trait: true means 'any CONFIRMED trait with confidence >= min_confidence'. available_to_all: true is the fallback shown to everyone when nothing specific matches.",
+  "jobs": [
+    {
+      "id": "outlier-general-001",
+      "title": "Rate AI responses",
+      "description": "Review and rank AI responses for quality and tone. No experience needed.",
+      "partner": "Outlier",
+      "partner_url": "https://outlier.ai/contributors",
+      "pay_range": "$18-25/hr",
+      "required_facts": {},
+      "required_fact_values": {},
+      "required_traits": [],
+      "requires_any_confirmed_trait": false,
+      "min_confidence": 0.0,
+      "available_to_all": true
+    },
+    {
+      "id": "outlier-creative-writing-001",
+      "title": "Train AI on creative writing",
+      "description": "Write and edit short creative pieces to teach an AI good prose, voice, and tone.",
+      "partner": "Outlier",
+      "partner_url": "https://outlier.ai/contributors",
+      "pay_range": "$20-30/hr",
+      "required_facts": {},
+      "required_fact_values": {
+        "occupation": ["writer", "author", "editor"],
+        "primary_hobby": ["reading", "writing"]
+      },
+      "required_traits": [],
+      "requires_any_confirmed_trait": false,
+      "min_confidence": 0.0,
+      "available_to_all": false
+    },
+    {
+      "id": "alignerr-code-review-001",
+      "title": "Review AI-generated code",
+      "description": "Evaluate and correct AI-written code for correctness and quality.",
+      "partner": "Alignerr",
+      "partner_url": "https://alignerr.com",
+      "pay_range": "$35-50/hr",
+      "required_facts": {},
+      "required_fact_values": {
+        "occupation": ["engineer", "developer", "programmer", "coder"]
+      },
+      "required_traits": [],
+      "requires_any_confirmed_trait": false,
+      "min_confidence": 0.0,
+      "available_to_all": false
+    },
+    {
+      "id": "mindrift-medical-eval-001",
+      "title": "Evaluate AI medical answers",
+      "description": "Review AI responses to health questions for clinical accuracy and safety.",
+      "partner": "Mindrift",
+      "partner_url": "https://mindrift.ai",
+      "pay_range": "$40-60/hr",
+      "required_facts": {},
+      "required_fact_values": {
+        "occupation": ["nurse", "doctor", "physician", "medical", "healthcare"]
+      },
+      "required_traits": [],
+      "requires_any_confirmed_trait": false,
+      "min_confidence": 0.0,
+      "available_to_all": false
+    },
+    {
+      "id": "dataannotation-general-ranking-001",
+      "title": "Rank AI answers for quality",
+      "description": "Carefully compare and rank AI answers — great for detail-oriented people.",
+      "partner": "DataAnnotation",
+      "partner_url": "https://www.dataannotation.tech",
+      "pay_range": "$15-25/hr",
+      "required_facts": {},
+      "required_fact_values": {},
+      "required_traits": [],
+      "requires_any_confirmed_trait": true,
+      "min_confidence": 0.8,
+      "available_to_all": false
+    }
+  ]
+}

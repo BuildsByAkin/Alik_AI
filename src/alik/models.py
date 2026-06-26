@@ -41,11 +41,22 @@ class CommitmentStatus(StrEnum):
 
 
 class CheckinType(StrEnum):
-    """Why the proactivity engine queued a check-in (Phase 5)."""
+    """Why the proactivity engine queued a check-in (Phase 5; Phase 7 adds the job types)."""
 
     DUE_COMMITMENT = "due_commitment"  # follow up on something now due
     UPCOMING_COMMITMENT = "upcoming_commitment"  # gentle heads-up before it's due
     GENERAL_CHECKIN = "general_checkin"  # lapsed user; "how are things?", not a commitment
+    JOB_RECOMMENDATION = "job_recommendation"  # Phase 7: a paid-work match worth a warm mention
+    JOB_FOLLOWUP = "job_followup"  # Phase 7: follow up on a recommendation already delivered
+
+
+class JobOutcome(StrEnum):
+    """How a delivered job recommendation turned out (Phase 7). Set at follow-up."""
+
+    TRIED_LIKED = "tried_liked"  # tried it, liked it
+    TRIED_DISLIKED = "tried_disliked"  # tried it, didn't like it (cool off + never that partner)
+    NOT_TRIED = "not_tried"  # didn't try it (cool off, different category next)
+    LOVED_IT = "loved_it"  # tried it, loved it
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +168,25 @@ class PendingCheckin:
     commitment_id: str | None = None  # null for general check-ins
     created_at: datetime | None = None
     delivered_at: datetime | None = None  # null = not yet delivered
+    id: str = field(default_factory=lambda: uuid4().hex)
+
+
+@dataclass(frozen=True, slots=True)
+class JobRecommendation:
+    """A row in ``job_recommendations_log`` (Phase 7) — one delivered/queued job thread.
+
+    The lifecycle is one open thread per user: a row with ``outcome is None`` is "open" and
+    blocks new recommendations. ``follow_up_after`` schedules the 3-day check-back;
+    ``follow_up_sent_at`` marks that the follow-up check-in was queued.
+    """
+
+    user_id: str
+    job_id: str
+    recommended_at: datetime
+    delivered_at: datetime | None = None
+    follow_up_after: datetime | None = None
+    follow_up_sent_at: datetime | None = None
+    outcome: JobOutcome | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
 
 

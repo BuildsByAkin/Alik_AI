@@ -5,7 +5,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from alik.models import MemoryRecord, PendingCheckin, RetrievedContext
+from alik.models import (
+    JobOutcome,
+    JobRecommendation,
+    MemoryRecord,
+    PendingCheckin,
+    RetrievedContext,
+)
 
 
 class Memory(ABC):
@@ -111,3 +117,50 @@ class Memory(ABC):
     @abstractmethod
     async def decrement_reflect_back_cooldown(self, user_id: str) -> None:
         """Count one session toward clearing the cooldown (floored at 0)."""
+
+    # --- Phase 7: earn / job-matching log -------------------------------------
+
+    @abstractmethod
+    async def log_job_recommendation(
+        self, user_id: str, job_id: str, *, follow_up_after_days: int
+    ) -> str:
+        """Record a queued recommendation; schedule follow_up_after = now + N days.
+
+        Returns the new row id. Opening a thread — blocks new recommendations until resolved.
+        """
+
+    @abstractmethod
+    async def get_recommended_job_ids(self, user_id: str) -> list[str]:
+        """Job ids already recommended to this user (dedup — never repeat a job)."""
+
+    @abstractmethod
+    async def get_job_recommendations(self, user_id: str) -> list[JobRecommendation]:
+        """All of the user's recommendation rows, newest first (drives gating/cooldowns)."""
+
+    @abstractmethod
+    async def mark_job_recommendation_delivered(self, rec_id: str) -> None:
+        """Stamp delivered_at when the companion shows the recommendation."""
+
+    @abstractmethod
+    async def get_due_job_followup(self, user_id: str) -> JobRecommendation | None:
+        """A delivered recommendation past its follow_up_after with no follow-up sent yet."""
+
+    @abstractmethod
+    async def mark_job_followup_sent(self, rec_id: str) -> None:
+        """Stamp follow_up_sent_at when the follow-up check-in is queued."""
+
+    @abstractmethod
+    async def get_pending_job_followup(self, user_id: str) -> JobRecommendation | None:
+        """The row whose follow-up was queued and is awaiting an outcome (for the companion)."""
+
+    @abstractmethod
+    async def update_job_outcome(self, rec_id: str, outcome: JobOutcome) -> None:
+        """Record how a recommendation turned out — closes the open thread."""
+
+    @abstractmethod
+    async def set_job_active(self, user_id: str, active: bool = True) -> None:
+        """Flag that the user has engaged with paid work (tried + liked at least once)."""
+
+    @abstractmethod
+    async def get_job_active(self, user_id: str) -> bool:
+        """Whether the user's job thread is active (default False)."""
