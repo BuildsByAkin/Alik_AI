@@ -10,6 +10,7 @@ from alik.companion import Companion
 from alik.config import Settings
 from alik.extraction import Extractor
 from alik.llm import AnthropicLLM
+from alik.matching_client import MatchingClient
 from alik.memory.graph import GraphMemory
 from alik.prompt import load_persona
 
@@ -37,6 +38,14 @@ async def _run() -> None:
         model=settings.extraction_model,
         max_tokens=settings.extraction_max_tokens,
     )
+    matching = (
+        MatchingClient(
+            base_url=settings.matching_service_url,
+            service_token=settings.service_token.get_secret_value(),
+        )
+        if settings.matching_service_url
+        else None
+    )
     companion = Companion(
         memory=memory,
         llm=llm,
@@ -48,6 +57,11 @@ async def _run() -> None:
         reflect_back_confidence_bump=settings.reflect_back_confidence_bump,
         corrected_trait_confidence=settings.corrected_trait_confidence,
         reflect_back_cooldown_sessions=settings.reflect_back_cooldown_sessions,
+        profile_confirm_min_confidence=settings.profile_confirm_min_confidence,
+        profile_confirm_min_observations=settings.profile_confirm_min_observations,
+        profile_behavior_min_confidence=settings.profile_behavior_min_confidence,
+        profile_confirm_confidence_bump=settings.reflect_back_confidence_bump,
+        matching_client=matching,
     )
 
     print(f"alik — session {session_id} (user {user_id}). Type /quit to end.\n")
@@ -78,6 +92,8 @@ async def _run() -> None:
         # loop, so wait for it before tearing down the connection.
         await companion.drain()
     finally:
+        if matching is not None:
+            await matching.aclose()
         await memory.aclose()
 
 

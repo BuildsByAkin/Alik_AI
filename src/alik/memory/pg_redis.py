@@ -15,11 +15,12 @@ import redis.asyncio as redis
 from alik.memory.base import Memory
 from alik.models import (
     CheckinType,
-    JobOutcome,
-    JobRecommendation,
+    DimensionStatus,
     MemoryRecord,
     MemoryTier,
     PendingCheckin,
+    ProfileDimension,
+    ProvenanceRecord,
     RetrievedContext,
 )
 
@@ -189,8 +190,7 @@ class PgRedisMemory(Memory):
             await conn.execute("DELETE FROM reflections WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM pending_checkins WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM reflect_back_cooldown WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM job_recommendations_log WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM user_job_state WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM profile_dimensions WHERE user_id = $1", user_id)
 
     # --- Phase 3: episodic lifecycle ------------------------------------------
 
@@ -348,111 +348,136 @@ class PgRedisMemory(Memory):
                 user_id,
             )
 
-    # --- Phase 7: earn / job-matching log -------------------------------------
+    # --- Living profile: behavioral dimensions --------------------------------
 
-    _JOBREC_COLS = (
-        "id, user_id, job_id, recommended_at, delivered_at, "
-        "follow_up_after, follow_up_sent_at, outcome"
+    _DIM_COLS = (
+        "id, user_id, dimension, value, content, confidence, observation_count, status, "
+        "surfaced_in_session, source_session_id, provenance, valid_from, last_observed_at, "
+        "updated_at"
     )
 
     @staticmethod
-    def _job_rec(row: asyncpg.Record) -> JobRecommendation:
-        return JobRecommendation(
+    def _profile_dim(row: asyncpg.Record) -> ProfileDimension:
+        prov = row["provenance"]
+        if isinstance(prov, str):
+            prov = json.loads(prov) if prov else {}
+        prov = prov or {}
+        return ProfileDimension(
             user_id=row["user_id"],
-            job_id=row["job_id"],
-            recommended_at=row["recommended_at"],
-            delivered_at=row["delivered_at"],
-            follow_up_after=row["follow_up_after"],
-            follow_up_sent_at=row["follow_up_sent_at"],
-            outcome=JobOutcome(row["outcome"]) if row["outcome"] else None,
+            dimension=row["dimension"],
+            value=row["value"],
+            content=row["content"],
+            confidence=row["confidence"],
+            valid_from=row["valid_from"],
+            updated_at=row["updated_at"],
+            provenance=ProvenanceRecord(
+                episode_ids=list(prov.get("episode_ids", [])),
+                signal_ids=list(prov.get("signal_ids", [])),
+            ),
+            observation_count=row["observation_count"],
+            status=DimensionStatus(row["status"]),
+            surfaced_in_session=row["surfaced_in_session"],
+            source_session_id=row["source_session_id"],
+            last_observed_at=row["last_observed_at"],
             id=str(row["id"]),
         )
 
-    async def log_job_recommendation(
-        self, user_id: str, job_id: str, *, follow_up_after_days: int
-    ) -> str:
-        async with self._pool.acquire() as conn:
-            rec_id = await conn.fetchval(
-                "INSERT INTO job_recommendations_log (user_id, job_id, follow_up_after) "
-                "VALUES ($1, $2, now() + ($3 || ' days')::interval) RETURNING id",
-                user_id,
-                job_id,
-                str(follow_up_after_days),
-            )
-        return str(rec_id)
-
-    async def get_recommended_job_ids(self, user_id: str) -> list[str]:
+    async def get_profile_dimensions(self, user_id: str) -> list[ProfileDimension]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT DISTINCT job_id FROM job_recommendations_log WHERE user_id = $1", user_id
-            )
-        return [r["job_id"] for r in rows]
-
-    async def get_job_recommendations(self, user_id: str) -> list[JobRecommendation]:
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                f"SELECT {self._JOBREC_COLS} FROM job_recommendations_log "
-                "WHERE user_id = $1 ORDER BY recommended_at DESC",
+                f"SELECT {self._DIM_COLS} FROM profile_dimensions WHERE user_id = $1 "
+                "ORDER BY dimension",
                 user_id,
             )
-        return [self._job_rec(r) for r in rows]
+        return [self._profile_dim(r) for r in rows]
 
-    async def mark_job_recommendation_delivered(self, rec_id: str) -> None:
+    async def put_profile_dimension(self, dimension: ProfileDimension) -> None:
+        provenance = json.dumps(
+            {
+                "episode_ids": list(dimension.provenance.episode_ids),
+                "signal_ids": list(dimension.provenance.signal_ids),
+            }
+        )
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE job_recommendations_log SET delivered_at = now() "
-                "WHERE id = $1::uuid AND delivered_at IS NULL",
-                rec_id,
+                "INSERT INTO profile_dimensions "
+                "(user_id, dimension, value, content, confidence, observation_count, status, "
+                " surfaced_in_session, source_session_id, provenance, valid_from, "
+                " last_observed_at, updated_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, now()) "
+                "ON CONFLICT (user_id, dimension) DO UPDATE SET "
+                "  value = excluded.value, content = excluded.content, "
+                "  confidence = excluded.confidence, "
+                "  observation_count = excluded.observation_count, status = excluded.status, "
+                "  surfaced_in_session = excluded.surfaced_in_session, "
+                "  source_session_id = excluded.source_session_id, "
+                "  provenance = excluded.provenance, "
+                "  last_observed_at = excluded.last_observed_at, updated_at = now()",
+                dimension.user_id,
+                dimension.dimension,
+                dimension.value,
+                dimension.content,
+                dimension.confidence,
+                dimension.observation_count,
+                str(dimension.status),
+                dimension.surfaced_in_session,
+                dimension.source_session_id,
+                provenance,
+                dimension.valid_from,
+                dimension.last_observed_at or dimension.valid_from,
             )
 
-    async def get_due_job_followup(self, user_id: str) -> JobRecommendation | None:
+    async def get_dimension_to_confirm(
+        self, user_id: str, session_id: str, *, min_confidence: float, min_observations: int
+    ) -> ProfileDimension | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                f"SELECT {self._JOBREC_COLS} FROM job_recommendations_log "
-                "WHERE user_id = $1 AND delivered_at IS NOT NULL AND follow_up_after < now() "
-                "AND follow_up_sent_at IS NULL AND outcome IS NULL "
-                "ORDER BY recommended_at ASC LIMIT 1",
+                f"SELECT {self._DIM_COLS} FROM profile_dimensions "
+                "WHERE user_id = $1 AND status = 'unconfirmed' AND confidence >= $2 "
+                "AND observation_count >= $3 "
+                "AND (surfaced_in_session IS NULL OR surfaced_in_session <> $4) "
+                "ORDER BY confidence DESC, observation_count DESC LIMIT 1",
                 user_id,
+                min_confidence,
+                min_observations,
+                session_id,
             )
-        return self._job_rec(row) if row is not None else None
+        return self._profile_dim(row) if row is not None else None
 
-    async def mark_job_followup_sent(self, rec_id: str) -> None:
+    async def confirm_dimension(
+        self, user_id: str, dimension: str, *, confidence_bump: float, session_id: str | None = None
+    ) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE job_recommendations_log SET follow_up_sent_at = now() WHERE id = $1::uuid",
-                rec_id,
-            )
-
-    async def get_pending_job_followup(self, user_id: str) -> JobRecommendation | None:
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"SELECT {self._JOBREC_COLS} FROM job_recommendations_log "
-                "WHERE user_id = $1 AND follow_up_sent_at IS NOT NULL AND outcome IS NULL "
-                "ORDER BY recommended_at DESC LIMIT 1",
+                "UPDATE profile_dimensions SET status = 'confirmed', "
+                "confidence = LEAST(confidence + $3, 1.0), "
+                "source_session_id = COALESCE($4, source_session_id), updated_at = now() "
+                "WHERE user_id = $1 AND dimension = $2",
                 user_id,
+                dimension,
+                confidence_bump,
+                session_id,
             )
-        return self._job_rec(row) if row is not None else None
 
-    async def update_job_outcome(self, rec_id: str, outcome: JobOutcome) -> None:
+    async def correct_dimension(
+        self, user_id: str, dimension: str, *, session_id: str | None = None
+    ) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "UPDATE job_recommendations_log SET outcome = $2 WHERE id = $1::uuid",
-                rec_id,
-                str(outcome),
+                "UPDATE profile_dimensions SET status = 'corrected', "
+                "source_session_id = COALESCE($3, source_session_id), updated_at = now() "
+                "WHERE user_id = $1 AND dimension = $2",
+                user_id,
+                dimension,
+                session_id,
             )
 
-    async def set_job_active(self, user_id: str, active: bool = True) -> None:
+    async def mark_dimension_surfaced(self, user_id: str, dimension: str, session_id: str) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO user_job_state (user_id, job_active) VALUES ($1, $2) "
-                "ON CONFLICT (user_id) DO UPDATE SET job_active = $2",
+                "UPDATE profile_dimensions SET surfaced_in_session = $3, updated_at = now() "
+                "WHERE user_id = $1 AND dimension = $2",
                 user_id,
-                active,
+                dimension,
+                session_id,
             )
-
-    async def get_job_active(self, user_id: str) -> bool:
-        async with self._pool.acquire() as conn:
-            val = await conn.fetchval(
-                "SELECT job_active FROM user_job_state WHERE user_id = $1", user_id
-            )
-        return bool(val)

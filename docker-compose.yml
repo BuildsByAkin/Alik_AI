@@ -39,6 +39,25 @@ services:
       timeout: 3s
       retries: 15
 
+  # The job-matching microservice's OWN Postgres (recommendation log + engagement flag).
+  # Host 5433 -> container 5432 so it doesn't clash with the brain's `postgres`.
+  matching-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: alik
+      POSTGRES_PASSWORD: alik
+      POSTGRES_DB: matching
+    ports:
+      - "5433:5432"
+    volumes:
+      - matchingdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alik"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
 volumes:
   pgdata:
   falkordata:
+  matchingdata:

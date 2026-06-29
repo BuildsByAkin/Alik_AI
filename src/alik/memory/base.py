@@ -6,10 +6,9 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 
 from alik.models import (
-    JobOutcome,
-    JobRecommendation,
     MemoryRecord,
     PendingCheckin,
+    ProfileDimension,
     RetrievedContext,
 )
 
@@ -118,49 +117,40 @@ class Memory(ABC):
     async def decrement_reflect_back_cooldown(self, user_id: str) -> None:
         """Count one session toward clearing the cooldown (floored at 0)."""
 
-    # --- Phase 7: earn / job-matching log -------------------------------------
+    # --- Living profile: behavioral dimensions --------------------------------
 
     @abstractmethod
-    async def log_job_recommendation(
-        self, user_id: str, job_id: str, *, follow_up_after_days: int
-    ) -> str:
-        """Record a queued recommendation; schedule follow_up_after = now + N days.
+    async def get_profile_dimensions(self, user_id: str) -> list[ProfileDimension]:
+        """All current profile dimensions for the user (any status)."""
 
-        Returns the new row id. Opening a thread — blocks new recommendations until resolved.
+    @abstractmethod
+    async def put_profile_dimension(self, dimension: ProfileDimension) -> None:
+        """Upsert a dimension by (user_id, dimension).
+
+        The accumulation policy lives in ``alik.profile.apply_observation``; this just
+        persists the already-merged row. ``valid_from`` (first observed) is preserved
+        across upserts.
         """
 
     @abstractmethod
-    async def get_recommended_job_ids(self, user_id: str) -> list[str]:
-        """Job ids already recommended to this user (dedup — never repeat a job)."""
+    async def get_dimension_to_confirm(
+        self, user_id: str, session_id: str, *, min_confidence: float, min_observations: int
+    ) -> ProfileDimension | None:
+        """An UNCONFIRMED dimension worth a gentle check: confident + observed enough,
+        and not already surfaced in this session. Highest-confidence first, else None."""
 
     @abstractmethod
-    async def get_job_recommendations(self, user_id: str) -> list[JobRecommendation]:
-        """All of the user's recommendation rows, newest first (drives gating/cooldowns)."""
+    async def confirm_dimension(
+        self, user_id: str, dimension: str, *, confidence_bump: float, session_id: str | None = None
+    ) -> None:
+        """User agreed in conversation — mark CONFIRMED and bump confidence."""
 
     @abstractmethod
-    async def mark_job_recommendation_delivered(self, rec_id: str) -> None:
-        """Stamp delivered_at when the companion shows the recommendation."""
+    async def correct_dimension(
+        self, user_id: str, dimension: str, *, session_id: str | None = None
+    ) -> None:
+        """User disagreed — mark CORRECTED (never drives behavior, never re-surfaced)."""
 
     @abstractmethod
-    async def get_due_job_followup(self, user_id: str) -> JobRecommendation | None:
-        """A delivered recommendation past its follow_up_after with no follow-up sent yet."""
-
-    @abstractmethod
-    async def mark_job_followup_sent(self, rec_id: str) -> None:
-        """Stamp follow_up_sent_at when the follow-up check-in is queued."""
-
-    @abstractmethod
-    async def get_pending_job_followup(self, user_id: str) -> JobRecommendation | None:
-        """The row whose follow-up was queued and is awaiting an outcome (for the companion)."""
-
-    @abstractmethod
-    async def update_job_outcome(self, rec_id: str, outcome: JobOutcome) -> None:
-        """Record how a recommendation turned out — closes the open thread."""
-
-    @abstractmethod
-    async def set_job_active(self, user_id: str, active: bool = True) -> None:
-        """Flag that the user has engaged with paid work (tried + liked at least once)."""
-
-    @abstractmethod
-    async def get_job_active(self, user_id: str) -> bool:
-        """Whether the user's job thread is active (default False)."""
+    async def mark_dimension_surfaced(self, user_id: str, dimension: str, session_id: str) -> None:
+        """Record that we soft-confirmed this dimension in ``session_id``."""

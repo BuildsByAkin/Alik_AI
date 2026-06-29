@@ -12,6 +12,7 @@ import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
+from alik import profile
 from alik.extraction import Extractor
 from alik.llm import LLMClient
 from alik.memory.base import Memory
@@ -31,10 +32,12 @@ from alik.prompt import (
     COMMITMENT_RESOLVE_SYSTEM,
     JOB_OUTCOME_CLASSIFY_SYSTEM,
     REFLECT_BACK_SYSTEM,
+    REFLECT_PROFILE_CONFIRM_SYSTEM,
     RESPONSE_CLASSIFY_SYSTEM,
     SUMMARY_SYSTEM,
     build_classify_request,
     build_job_outcome_request,
+    build_profile_confirm_request,
     build_reflect_back_request,
     build_resolve_request,
     build_system_prompt,
@@ -62,6 +65,11 @@ class Companion:
         reflect_back_confidence_bump: float = 0.1,
         corrected_trait_confidence: float = 0.7,
         reflect_back_cooldown_sessions: int = 3,
+        profile_confirm_min_confidence: float = 0.6,
+        profile_confirm_min_observations: int = 2,
+        profile_behavior_min_confidence: float = 0.75,
+        profile_confirm_confidence_bump: float = 0.1,
+        matching_client=None,
     ) -> None:
         self._memory = memory
         self._llm = llm
@@ -75,16 +83,27 @@ class Companion:
         self._rb_bump = reflect_back_confidence_bump
         self._corrected_confidence = corrected_trait_confidence
         self._rb_cooldown_sessions = reflect_back_cooldown_sessions
+        # Living-profile soft-confirm tuning (from Settings).
+        self._pd_confirm_min_confidence = profile_confirm_min_confidence
+        self._pd_confirm_min_observations = profile_confirm_min_observations
+        self._pd_behavior_min_confidence = profile_behavior_min_confidence
+        self._pd_confirm_bump = profile_confirm_confidence_bump
         # Per-session reflect-back state (in-process; conscious carve-out — see CLAUDE.md).
         # session_id -> trait_id we surfaced and are awaiting a classification for.
         self._rb_pending: dict[str, str] = {}
-        # sessions where reflect-back already fired (surface at most once per session).
+        # session_id -> dimension name we soft-confirmed and are awaiting a reply for.
+        self._pd_pending: dict[str, str] = {}
+        # sessions where a gentle check (reflect-back OR profile-confirm) already fired —
+        # at most one per session so it never feels like an interview.
         self._rb_done: set[str] = set()
         # Phase 5 proactive-opener state (same in-process carve-out as reflect-back).
         self._checkin_opened: set[str] = set()  # sessions that already delivered an opener
         self._checkin_commitment: dict[str, CommitmentNode] = {}  # session -> commitment to resolve
         self._checkin_grace: dict[str, int] = {}  # session -> remaining "unclear" turns
-        # Phase 7 job-checkin state (same in-process carve-out). session -> dict with
+        # Job matching lives in its own microservice now; this client is the delivery seam
+        # (None → job nudges are simply never delivered, graceful).
+        self._matching = matching_client
+        # Job-checkin state (same in-process carve-out). session -> dict with
         # {"type": "recommendation"|"followup", "url": str|None, "rec_id": str|None}.
         self._job_checkin: dict[str, dict] = {}
 
@@ -111,6 +130,13 @@ class Companion:
         if pending is not None:
             await self._handle_reflect_back_response(user_id, session_id, pending, user_message)
 
+        # If we gently checked a profile dimension last turn, this is their answer to it.
+        pd_pending = self._pd_pending.pop(session_id, None)
+        if pd_pending is not None:
+            await self._handle_profile_confirm_response(
+                user_id, session_id, pd_pending, user_message
+            )
+
         # If a job recommendation/follow-up is open, this message is their reply to it.
         job_directive: str | None = None
         if session_id in self._job_checkin:
@@ -124,12 +150,16 @@ class Companion:
             ctx.commitments,
             reflection=ctx.reflection,
             traits=ctx.traits,
+            behavior_directives=self._behavior_directives(ctx.dimensions),
         )
         if job_directive:
             system += f"\n\n{job_directive}"
 
-        # Reflect-back: at most once per session, never in the first 3 completed turns.
+        # One gentle check per session: prefer a reflect-back question, else a profile
+        # soft-confirm. Both share the cadence cooldown so it never feels like an interview.
         question = await self._maybe_reflect_back(user_id, session_id, ctx.working)
+        if not question:
+            question = await self._maybe_profile_confirm(user_id, session_id, ctx.working)
         if question:
             system += (
                 "\n\nSomewhere natural in your reply, gently weave in this one question "
@@ -258,6 +288,83 @@ class Companion:
         )
         await mem.write_traits([new])
 
+    # --- Living profile: behavior adjustment + soft-confirm -------------------
+    #
+    # Behavior directives quietly shape HOW the companion shows up (structure, sensory,
+    # predictability) — never said aloud, never a label. Soft-confirm is the trait
+    # reflect-back's sibling for behavioral DIMENSIONS: when one is confident enough we
+    # gently check it in conversation; the reply confirms or corrects it. Profile methods
+    # are on the base Memory ABC (Postgres), so unlike traits they need no duck-typing.
+
+    def _behavior_directives(self, dimensions) -> list[str]:
+        return profile.behavior_directives(
+            dimensions, behavior_min_confidence=self._pd_behavior_min_confidence
+        )
+
+    async def _maybe_profile_confirm(
+        self, user_id: str, session_id: str, working: list[MemoryRecord]
+    ) -> str | None:
+        """Pick and phrase one gentle profile soft-confirm question, or return None.
+
+        Same gates as reflect-back: not already used this session, enough completed
+        turns, and the shared cadence cooldown is clear. Targets a confident-enough
+        UNCONFIRMED dimension not yet surfaced this session.
+        """
+        if session_id in self._rb_done:
+            return None
+        completed_turns = sum(1 for t in working if t.role == "assistant")
+        if completed_turns < self._rb_min_turn:
+            return None
+        if not await self._memory.reflect_back_ready(user_id):
+            return None
+        try:
+            dim = await self._memory.get_dimension_to_confirm(
+                user_id,
+                session_id,
+                min_confidence=self._pd_confirm_min_confidence,
+                min_observations=self._pd_confirm_min_observations,
+            )
+        except Exception:
+            logger.exception("profile soft-confirm: get_dimension_to_confirm failed")
+            return None
+        if dim is None:
+            return None
+
+        question = (
+            await self._llm.complete(
+                system=REFLECT_PROFILE_CONFIRM_SYSTEM,
+                messages=build_profile_confirm_request(dim),
+            )
+        ).strip()
+        if not question:
+            return None
+
+        await self._memory.mark_dimension_surfaced(user_id, dim.dimension, session_id)
+        self._pd_pending[session_id] = dim.dimension
+        self._rb_done.add(session_id)  # one gentle check per session, shared with reflect-back
+        await self._memory.set_reflect_back_cooldown(user_id, self._rb_cooldown_sessions)
+        return question
+
+    async def _handle_profile_confirm_response(
+        self, user_id: str, session_id: str, dimension: str, user_message: str
+    ) -> None:
+        """Classify the user's reply to a soft-confirmed dimension: confirm/correct/deflect."""
+        try:
+            raw = await self._llm.complete(
+                system=RESPONSE_CLASSIFY_SYSTEM, messages=build_classify_request(user_message)
+            )
+        except Exception:
+            logger.exception("profile soft-confirm: classification call failed")
+            return
+        classification, _ = parse_classification(raw)
+        if classification == "confirm":
+            await self._memory.confirm_dimension(
+                user_id, dimension, confidence_bump=self._pd_confirm_bump, session_id=session_id
+            )
+        elif classification == "correct":
+            await self._memory.correct_dimension(user_id, dimension, session_id=session_id)
+        # deflect: leave it unconfirmed (the cadence cooldown spaces out any re-ask).
+
     # --- Phase 5: proactive opener + commitment resolution --------------------
     #
     # Check-in queue methods (get_pending_checkin/mark_checkin_delivered) are on the
@@ -292,6 +399,7 @@ class Companion:
             ctx.commitments,
             reflection=ctx.reflection,
             traits=ctx.traits,
+            behavior_directives=self._behavior_directives(ctx.dimensions),
             opening_directive=directive,
         )
         opener = (
@@ -316,14 +424,17 @@ class Companion:
             if match is not None:
                 self._checkin_commitment[session_id] = match
                 self._checkin_grace[session_id] = 1  # first turn + one "unclear" grace turn
-        # Phase 7: set up job-checkin state so the user's next turn is handled.
-        if checkin.checkin_type is CheckinType.JOB_RECOMMENDATION:
-            await self._setup_job_recommendation(user_id, session_id, checkin.message_hint)
-        elif checkin.checkin_type is CheckinType.JOB_FOLLOWUP:
-            await self._setup_job_followup(user_id, session_id)
+        # Set up job-checkin state so the user's next turn is handled (matching service only).
+        if self._matching is not None:
+            if checkin.checkin_type is CheckinType.JOB_RECOMMENDATION:
+                await self._setup_job_recommendation(user_id, session_id, checkin.message_hint)
+            elif checkin.checkin_type is CheckinType.JOB_FOLLOWUP:
+                await self._setup_job_followup(user_id, session_id)
         return opener
 
-    # --- Phase 7: job recommendation delivery + lifecycle ---------------------
+    # --- Job recommendation delivery + lifecycle (via the matching microservice) ----
+    # Selection/logging/outcomes live in the matching service; the companion only delivers
+    # the opener, shares the link on a "yes", and classifies the follow-up reply.
 
     @staticmethod
     def _opening_directive(checkin_type: CheckinType, hint: str) -> str:
@@ -352,23 +463,23 @@ class Companion:
 
     async def _setup_job_recommendation(self, user_id: str, session_id: str, hint: str) -> None:
         """Mark the open recommendation delivered (so the 3-day follow-up can fire) and stash
-        the link so a 'yes' next turn can share it. URL travels inside the hint."""
-        recs = await self._memory.get_job_recommendations(user_id)
-        open_rec = next((r for r in recs if r.outcome is None and r.delivered_at is None), None)
+        the link so a 'yes' next turn can share it. URL comes from the matching service (the
+        hint is the fallback source)."""
+        open_rec = await self._matching.open_recommendation(user_id)
         if open_rec is not None:
-            await self._memory.mark_job_recommendation_delivered(open_rec.id)
+            await self._matching.mark_delivered(open_rec["recommendation_id"])
         self._job_checkin[session_id] = {
             "type": "recommendation",
-            "url": self._extract_url(hint),
-            "rec_id": open_rec.id if open_rec is not None else None,
+            "url": (open_rec or {}).get("partner_url") or self._extract_url(hint),
+            "rec_id": open_rec["recommendation_id"] if open_rec is not None else None,
         }
 
     async def _setup_job_followup(self, user_id: str, session_id: str) -> None:
-        rec = await self._memory.get_pending_job_followup(user_id)
+        rec = await self._matching.pending_followup(user_id)
         self._job_checkin[session_id] = {
             "type": "followup",
             "url": None,
-            "rec_id": rec.id if rec is not None else None,
+            "rec_id": rec["recommendation_id"] if rec is not None else None,
         }
 
     @staticmethod
@@ -421,7 +532,8 @@ class Companion:
             return None  # leave the thread open; don't guess
         rec_id = state.get("rec_id")
         if rec_id is not None:
-            await self._memory.update_job_outcome(rec_id, outcome)
+            # The matching service records the outcome and flips job_active for liked/loved.
+            await self._matching.post_outcome(user_id, rec_id, str(outcome))
         await self._apply_job_outcome(user_id, session_id, outcome)
         if outcome is JobOutcome.NOT_TRIED:
             return (
@@ -431,9 +543,9 @@ class Companion:
         return None
 
     async def _apply_job_outcome(self, user_id: str, session_id: str, outcome: JobOutcome) -> None:
-        """Side effects of a classified outcome: activate the thread + feed the pattern layer."""
+        """Feed the classified outcome back to the BRAIN's pattern layer as an EmotionalSignal
+        (engagement state itself lives in the matching service)."""
         if outcome in (JobOutcome.TRIED_LIKED, JobOutcome.LOVED_IT):
-            await self._memory.set_job_active(user_id, True)
             await self._write_job_signal(
                 user_id,
                 session_id,

@@ -24,14 +24,14 @@ from alik.memory.pg_redis import PgRedisMemory
 from alik.models import (
     CommitmentNode,
     CommitmentStatus,
+    DimensionStatus,
     GraphNode,
     InferredTrait,
-    JobOutcome,
-    JobRecommendation,
     MemoryRecord,
     MemoryTier,
     NodeType,
     PendingCheckin,
+    ProfileDimension,
     RetrievedContext,
     TraitStatus,
 )
@@ -114,8 +114,7 @@ class InMemoryMemory(Memory):
         self._reflections: dict[str, list[dict]] = {}
         self._checkins: list[PendingCheckin] = []  # Phase 5 queue
         self._rb_cooldown: dict[str, int] = {}  # Phase 5.2 reflect-back cadence
-        self._job_recs: list[JobRecommendation] = []  # Phase 7 recommendation log
-        self._job_active: dict[str, bool] = {}  # Phase 7 per-user engagement flag
+        self._dimensions: dict[tuple[str, str], ProfileDimension] = {}  # living-profile layer
         self._reflection_after_days = reflection_after_days
 
     def _to_record(self, user_id: str, ep: dict) -> MemoryRecord:
@@ -173,6 +172,7 @@ class InMemoryMemory(Memory):
             episodes=episodes,
             working=working,
             reflection=latest_reflection if use_reflection else None,
+            dimensions=[d for (uid, _), d in self._dimensions.items() if uid == user_id],
         )
 
     async def invalidate(self, user_id: str, session_id: str) -> None:
@@ -183,8 +183,7 @@ class InMemoryMemory(Memory):
         self._reflections.pop(user_id, None)
         self._checkins = [c for c in self._checkins if c.user_id != user_id]
         self._rb_cooldown.pop(user_id, None)
-        self._job_recs = [r for r in self._job_recs if r.user_id != user_id]
-        self._job_active.pop(user_id, None)
+        self._dimensions = {k: v for k, v in self._dimensions.items() if k[0] != user_id}
         for key in [k for k in self._working if k[0] == user_id]:
             self._working.pop(key, None)
 
@@ -218,71 +217,61 @@ class InMemoryMemory(Memory):
     async def decrement_reflect_back_cooldown(self, user_id: str) -> None:
         self._rb_cooldown[user_id] = max(0, self._rb_cooldown.get(user_id, 0) - 1)
 
-    # --- Phase 7: earn / job-matching log ---------------------------------
+    # --- Living profile: behavioral dimensions ----------------------------
 
-    def _user_recs(self, user_id: str) -> list[JobRecommendation]:
-        recs = [r for r in self._job_recs if r.user_id == user_id]
-        recs.sort(key=lambda r: r.recommended_at, reverse=True)
-        return recs
+    async def get_profile_dimensions(self, user_id: str) -> list[ProfileDimension]:
+        return [d for (uid, _), d in self._dimensions.items() if uid == user_id]
 
-    async def log_job_recommendation(
-        self, user_id: str, job_id: str, *, follow_up_after_days: int
-    ) -> str:
-        now = datetime.now(UTC)
-        rec = JobRecommendation(
-            user_id=user_id,
-            job_id=job_id,
-            recommended_at=now,
-            follow_up_after=now + timedelta(days=follow_up_after_days),
-        )
-        self._job_recs.append(rec)
-        return rec.id
+    async def put_profile_dimension(self, dimension: ProfileDimension) -> None:
+        self._dimensions[(dimension.user_id, dimension.dimension)] = dimension
 
-    async def get_recommended_job_ids(self, user_id: str) -> list[str]:
-        return list({r.job_id for r in self._job_recs if r.user_id == user_id})
-
-    async def get_job_recommendations(self, user_id: str) -> list[JobRecommendation]:
-        return self._user_recs(user_id)
-
-    def _replace_rec(self, rec_id: str, **changes) -> None:
-        self._job_recs = [replace(r, **changes) if r.id == rec_id else r for r in self._job_recs]
-
-    async def mark_job_recommendation_delivered(self, rec_id: str) -> None:
-        self._replace_rec(rec_id, delivered_at=datetime.now(UTC))
-
-    async def get_due_job_followup(self, user_id: str) -> JobRecommendation | None:
-        now = datetime.now(UTC)
-        due = [
-            r
-            for r in self._user_recs(user_id)
-            if r.delivered_at is not None
-            and r.follow_up_after is not None
-            and r.follow_up_after < now
-            and r.follow_up_sent_at is None
-            and r.outcome is None
+    async def get_dimension_to_confirm(
+        self, user_id: str, session_id: str, *, min_confidence: float, min_observations: int
+    ) -> ProfileDimension | None:
+        candidates = [
+            d
+            for (uid, _), d in self._dimensions.items()
+            if uid == user_id
+            and d.status is DimensionStatus.UNCONFIRMED
+            and d.confidence >= min_confidence
+            and d.observation_count >= min_observations
+            and d.surfaced_in_session != session_id
         ]
-        due.sort(key=lambda r: r.recommended_at)
-        return due[0] if due else None
+        candidates.sort(key=lambda d: (d.confidence, d.observation_count), reverse=True)
+        return candidates[0] if candidates else None
 
-    async def mark_job_followup_sent(self, rec_id: str) -> None:
-        self._replace_rec(rec_id, follow_up_sent_at=datetime.now(UTC))
+    async def confirm_dimension(
+        self, user_id: str, dimension: str, *, confidence_bump: float, session_id: str | None = None
+    ) -> None:
+        key = (user_id, dimension)
+        d = self._dimensions.get(key)
+        if d is not None:
+            self._dimensions[key] = replace(
+                d,
+                status=DimensionStatus.CONFIRMED,
+                confidence=min(d.confidence + confidence_bump, 1.0),
+                source_session_id=session_id or d.source_session_id,
+                updated_at=datetime.now(UTC),
+            )
 
-    async def get_pending_job_followup(self, user_id: str) -> JobRecommendation | None:
-        pending = [
-            r
-            for r in self._user_recs(user_id)
-            if r.follow_up_sent_at is not None and r.outcome is None
-        ]
-        return pending[0] if pending else None
+    async def correct_dimension(
+        self, user_id: str, dimension: str, *, session_id: str | None = None
+    ) -> None:
+        key = (user_id, dimension)
+        d = self._dimensions.get(key)
+        if d is not None:
+            self._dimensions[key] = replace(
+                d,
+                status=DimensionStatus.CORRECTED,
+                source_session_id=session_id or d.source_session_id,
+                updated_at=datetime.now(UTC),
+            )
 
-    async def update_job_outcome(self, rec_id: str, outcome: JobOutcome) -> None:
-        self._replace_rec(rec_id, outcome=outcome)
-
-    async def set_job_active(self, user_id: str, active: bool = True) -> None:
-        self._job_active[user_id] = active
-
-    async def get_job_active(self, user_id: str) -> bool:
-        return self._job_active.get(user_id, False)
+    async def mark_dimension_surfaced(self, user_id: str, dimension: str, session_id: str) -> None:
+        key = (user_id, dimension)
+        d = self._dimensions.get(key)
+        if d is not None:
+            self._dimensions[key] = replace(d, surfaced_in_session=session_id)
 
     # --- Phase 3 ----------------------------------------------------------
 
@@ -336,6 +325,51 @@ class InMemoryMemory(Memory):
     async def get_reflection(self, user_id: str) -> str | None:
         reflections = self._reflections.get(user_id, [])
         return reflections[-1]["content"] if reflections else None
+
+
+class FakeMatching:
+    """Stand-in for the job-matching microservice client (no HTTP).
+
+    The brain only delivers + reports; selection/cooldown/state live in the real service,
+    so this double just returns canned responses and records the calls the brain makes.
+    """
+
+    def __init__(self, *, match_result=None, due=None, open_rec=None, pending=None) -> None:
+        self.match_result = match_result
+        self.due = due
+        self.open_rec = open_rec
+        self.pending = pending
+        self.followup_sent: list[str] = []
+        self.delivered: list[str] = []
+        self.outcomes: list[tuple[str, str, str]] = []
+        self.deleted: list[str] = []
+
+    async def match(self, user_id: str):
+        return self.match_result
+
+    async def due_followup(self, user_id: str):
+        return self.due
+
+    async def mark_followup_sent(self, rec_id: str) -> None:
+        self.followup_sent.append(rec_id)
+
+    async def open_recommendation(self, user_id: str):
+        return self.open_rec
+
+    async def mark_delivered(self, rec_id: str) -> None:
+        self.delivered.append(rec_id)
+
+    async def pending_followup(self, user_id: str):
+        return self.pending
+
+    async def post_outcome(self, user_id: str, rec_id: str, outcome: str) -> None:
+        self.outcomes.append((user_id, rec_id, outcome))
+
+    async def delete_user(self, user_id: str) -> None:
+        self.deleted.append(user_id)
+
+    async def aclose(self) -> None:
+        pass
 
 
 @pytest.fixture

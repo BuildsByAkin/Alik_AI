@@ -40,6 +40,19 @@ class CommitmentStatus(StrEnum):
     RESOLVED_DROPPED = "resolved_dropped"  # user let it go
 
 
+class DimensionStatus(StrEnum):
+    """Lifecycle of a ProfileDimension (the living-profile behavioral layer).
+
+    Mirrors the InferredTrait lifecycle, but for fixed-taxonomy behavioral axes:
+    unconfirmed evidence accumulates silently; a soft-confirm in conversation moves a
+    dimension to CONFIRMED or CORRECTED. Tracking them separately is what lets the
+    companion know which dimensions still need a gentle check."""
+
+    UNCONFIRMED = "unconfirmed"  # inferred from accumulated evidence; not yet checked with the user
+    CONFIRMED = "confirmed"  # user agreed via soft-confirm; authoritative for behavior + matching
+    CORRECTED = "corrected"  # user disagreed; never drives behavior, never re-surfaced
+
+
 class CheckinType(StrEnum):
     """Why the proactivity engine queued a check-in (Phase 5; Phase 7 adds the job types)."""
 
@@ -172,22 +185,46 @@ class PendingCheckin:
 
 
 @dataclass(frozen=True, slots=True)
-class JobRecommendation:
-    """A row in ``job_recommendations_log`` (Phase 7) — one delivered/queued job thread.
+class ProfileDimension:
+    """One axis of the living profile (the behavioral layer).
 
-    The lifecycle is one open thread per user: a row with ``outcome is None`` is "open" and
-    blocks new recommendations. ``follow_up_after`` schedules the 3-day check-back;
-    ``follow_up_sent_at`` marks that the follow-up check-in was queued.
+    ``dimension`` + ``value`` are drawn from the fixed taxonomy in ``alik.profile``;
+    ``content`` is the human-readable sentence the soft-confirm question is phrased from
+    (it names the concrete evidence, e.g. "seems intensely into chess specifically").
+    Confidence accumulates across nightly observations; ``status`` separates confirmed
+    from still-needs-a-check dimensions. Provenance is mandatory, like InferredTraits.
     """
 
     user_id: str
-    job_id: str
-    recommended_at: datetime
-    delivered_at: datetime | None = None
-    follow_up_after: datetime | None = None
-    follow_up_sent_at: datetime | None = None
-    outcome: JobOutcome | None = None
+    dimension: str  # taxonomy axis, e.g. "structure_preference"
+    value: str  # taxonomy value, e.g. "needs_structure"
+    content: str  # one human-readable sentence (drives the soft-confirm question)
+    confidence: float
+    valid_from: datetime
+    updated_at: datetime
+    provenance: ProvenanceRecord = field(default_factory=ProvenanceRecord)
+    observation_count: int = 1  # how many nightly passes have evidenced this
+    status: DimensionStatus = DimensionStatus.UNCONFIRMED
+    surfaced_in_session: str | None = None  # last session we soft-confirmed it in
+    source_session_id: str | None = None  # session a confirm/correct was stated in, if any
+    last_observed_at: datetime | None = None  # last nightly pass that (re)saw it
     id: str = field(default_factory=lambda: uuid4().hex)
+
+
+@dataclass(frozen=True, slots=True)
+class AssembledProfile:
+    """The single rich picture of a user, assembled on read (the Profile API payload).
+
+    Combines identity from the auth microservice with everything the brain has learned
+    silently: current facts, CONFIRMED traits, and the behavioral dimensions. This is
+    what the (next) matching service consumes. ``identity`` is None if auth is down.
+    """
+
+    user_id: str
+    identity: dict | None
+    facts: list[GraphNode] = field(default_factory=list)
+    confirmed_traits: list[InferredTrait] = field(default_factory=list)
+    dimensions: list[ProfileDimension] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,3 +244,6 @@ class RetrievedContext:
     commitments: list[CommitmentNode] = field(default_factory=list)  # open commitments (Phase 5)
     reflection: str | None = None  # Phase 3: replaces episodes for 30+ day users
     traits: list[InferredTrait] = field(default_factory=list)  # Phase 4: current inferred traits
+    dimensions: list[ProfileDimension] = field(
+        default_factory=list
+    )  # living-profile behavioral layer

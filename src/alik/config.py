@@ -55,13 +55,17 @@ class Settings(BaseSettings):
     proactivity_upcoming_hours: int = 24  # heads-up window for commitments coming due.
     proactivity_interval_hours: int = 1  # scheduler: how often the proactivity engine runs.
 
-    # Earn / job matching (Phase 7).
-    job_catalog_path: str = "data/jobs.json"  # source-of-truth catalog; add a job = add JSON.
-    job_match_threshold: float = 0.5  # MATCH: minimum specific-job score to recommend.
-    job_match_enabled: bool = True  # false disables both job passes with no code change.
-    job_followup_after_days: int = 3  # wait this long after delivery before following up.
-    job_disliked_cooldown_days: int = 14  # after tried_disliked, recommend nothing for N days.
-    job_not_tried_cooldown_days: int = 7  # after not_tried, wait N days then a different category.
+    # Living profile (behavioral dimensions + soft-confirm).
+    profile_confidence_step: float = 0.25  # how much a repeat observation raises confidence.
+    profile_confirm_min_confidence: float = 0.6  # only soft-confirm dimensions at/above this.
+    profile_confirm_min_observations: int = 2  # ...and seen at least this many nightly passes.
+    profile_behavior_min_confidence: float = 0.75  # UNCONFIRMED dims drive behavior at/above this.
+
+    # Service mesh. One shared X-Service-Token authenticates brain<->auth<->matching and
+    # guards the brain's own /users/{id}/profile read. Set the SAME value on every service.
+    service_token: SecretStr = SecretStr("")
+    auth_service_url: str = "http://localhost:8001"  # identity for the profile + erasure.
+    matching_service_url: str = "http://localhost:8002"  # job matching (empty disables it).
 
     # Optional persona override; falls back to the packaged persona.txt.
     persona_path: str | None = None

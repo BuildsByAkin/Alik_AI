@@ -16,9 +16,11 @@ from alik.models import (
     JobOutcome,
     MemoryRecord,
     NodeType,
+    ProfileDimension,
     ProvenanceRecord,
     TraitStatus,
 )
+from alik.profile import is_valid, taxonomy_prompt_block
 
 SUMMARY_SYSTEM = (
     "You summarize a chat conversation between a user and their AI companion. "
@@ -96,6 +98,7 @@ def build_system_prompt(
     reflection: str | None = None,
     traits: Sequence[InferredTrait] = (),
     opening_directive: str | None = None,
+    behavior_directives: Sequence[str] = (),
 ) -> str:
     """Persona plus injected memory of who this person is.
 
@@ -107,6 +110,8 @@ def build_system_prompt(
     traits are never stated as fact — they surface only via reflect-back.
     Phase 5: commitments are status-aware (due ones flagged); a proactive
     opening_directive, when present, tells the companion how to open the session.
+    Living profile: ``behavior_directives`` quietly adjust HOW the companion shows up
+    (structure, sensory, predictability...) — never stated to the person, never a label.
     """
     sections = [persona]
     if reflection:
@@ -127,6 +132,12 @@ def build_system_prompt(
     if episodes and not reflection:
         lines = "\n".join(f"- {e.content}" for e in episodes)
         sections.append(f"What you remember from previous conversations:\n{lines}")
+    if behavior_directives:
+        lines = "\n".join(f"- {d}" for d in behavior_directives)
+        sections.append(
+            "How to be with this person (adjust naturally; never say any of this aloud and "
+            f"never label them):\n{lines}"
+        )
     if opening_directive:
         sections.append(opening_directive)
     return "\n\n".join(sections)
@@ -572,6 +583,122 @@ def _cited(value: object, known: set[str]) -> list[str]:
         if s in known:
             out.append(s)
     return out
+
+
+# --- Living profile: behavioral-dimension detection + soft-confirm -----------
+
+PROFILE_DETECTION_SYSTEM = (
+    "You build a quiet BEHAVIORAL profile of a person from how they talk and what they "
+    "say across their notable past episodes and emotional signals. You place them on a "
+    "FIXED set of axes — only these axes, only the listed values for each:\n\n"
+    + taxonomy_prompt_block()
+    + "\n\n"
+    "You are given episodes and signals, each tagged [ep:<id>] or [sig:<id>]. Return ONLY "
+    "a JSON array of objects, each:\n"
+    '{"dimension": <one axis name above>, "value": <one allowed value for that axis>, '
+    '"content": <one human sentence naming the concrete evidence, e.g. "seems intensely '
+    'into chess specifically">, "confidence": <0.0-1.0>, "provenance_episode_ids": [<ids>], '
+    '"provenance_signal_ids": [<ids>]}.\n\n'
+    "RULES:\n"
+    "- Only emit an axis you have real evidence for. Skip the rest — never guess, never "
+    "fill in every axis. When unsure, leave it out.\n"
+    "- value MUST be one of the listed values for that axis, copied verbatim.\n"
+    "- PROVENANCE IS MANDATORY: cite the exact episode/signal ids (bare value inside the "
+    "tag), using ONLY ids present in the input; at least one per object. Drop anything you "
+    "cannot ground.\n"
+    "- At most one object per axis. Keep content to ONE sentence (a long reply gets "
+    "truncated and lost).\n"
+    "Output JSON only, no prose."
+)
+
+REFLECT_PROFILE_CONFIRM_SYSTEM = (
+    "You are the person's AI companion. You've quietly noticed something about HOW they "
+    "are — a tendency in how they communicate or move through the world. Write ONE warm, "
+    "natural question that gently checks whether you've got it right, the way a close "
+    "friend would when they want to make sure they understood. Offer them an easy way to "
+    "confirm OR correct it. Never clinical, never a label, never a diagnosis — just curious "
+    "and kind. For example: \"you've mentioned chess a few times — is that something "
+    "you're really into, or more just something that's been around lately?\" Output ONLY "
+    "the question."
+)
+
+
+def build_profile_detection_request(
+    promoted_episodes: Sequence[MemoryRecord],
+    signals: Sequence[GraphNode],
+    current_dimensions: Sequence[ProfileDimension] = (),
+) -> list[dict]:
+    """Render evidence (id-tagged for provenance) plus the dimensions already tracked."""
+
+    def block(title: str, lines: Sequence[str]) -> str:
+        if not lines:
+            return f"{title}: (none)"
+        return f"{title}:\n" + "\n".join(lines)
+
+    ep_lines = [f"[ep:{e.id}] {e.content}" for e in promoted_episodes if e.id]
+    sig_lines = [f"[sig:{s.id}] {s.content}" for s in signals]
+    dim_lines = [f"{d.dimension} = {d.value} ({d.status})" for d in current_dimensions]
+    parts = [
+        block("Notable past episodes", ep_lines),
+        block("Emotional signals", sig_lines),
+        block("Dimensions already tracked (refine these; reuse the same axis)", dim_lines),
+    ]
+    return [{"role": "user", "content": "\n\n".join(parts)}]
+
+
+def parse_profile_detection(
+    raw: str,
+    *,
+    user_id: str,
+    known_episode_ids: set[str],
+    known_signal_ids: set[str],
+    valid_from: datetime | None = None,
+) -> list[ProfileDimension]:
+    """Parse the detector's JSON into ProfileDimensions.
+
+    Each object is validated against the fixed taxonomy (unknown axis or value -> dropped)
+    and provenance is enforced (ids filtered to the input; zero -> dropped). Tolerant of
+    truncation/prose; a malformed reply yields [] so the sleep pass never crashes.
+    """
+    valid_from = valid_from or datetime.now(UTC)
+    out: list[ProfileDimension] = []
+    seen: set[str] = set()  # at most one object per axis (first wins)
+    for item in _salvage_objects(raw):
+        dimension = str(item.get("dimension") or "").strip()
+        value = str(item.get("value") or "").strip()
+        content = str(item.get("content", "")).strip()
+        if not dimension or not value or not content or dimension in seen:
+            continue
+        if not is_valid(dimension, value):
+            continue
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        episode_ids = _cited(item.get("provenance_episode_ids"), known_episode_ids)
+        signal_ids = _cited(item.get("provenance_signal_ids"), known_signal_ids)
+        if not episode_ids and not signal_ids:
+            continue
+        seen.add(dimension)
+        out.append(
+            ProfileDimension(
+                user_id=user_id,
+                dimension=dimension,
+                value=value,
+                content=content,
+                confidence=confidence,
+                valid_from=valid_from,
+                updated_at=valid_from,
+                last_observed_at=valid_from,
+                provenance=ProvenanceRecord(episode_ids=episode_ids, signal_ids=signal_ids),
+            )
+        )
+    return out
+
+
+def build_profile_confirm_request(dimension: ProfileDimension) -> list[dict]:
+    """Wrap a dimension's human sentence for the gentle soft-confirm question."""
+    return [{"role": "user", "content": f"What you've quietly noticed: {dimension.content}"}]
 
 
 # --- Phase 5.3: cross-key trait consolidation (semantic dedup) ----------------

@@ -30,11 +30,10 @@ from alik.models import (
     CommitmentStatus,
     GraphNode,
     InferredTrait,
-    JobOutcome,
-    JobRecommendation,
     MemoryRecord,
     NodeType,
     PendingCheckin,
+    ProfileDimension,
     RetrievedContext,
     TraitStatus,
 )
@@ -198,6 +197,7 @@ class GraphMemory(Memory):
         facts = await self._current(user_id, NodeType.FACT)
         commitments = await self.get_open_commitments(user_id)
         traits = await self.get_current_traits(user_id)
+        dimensions = await self._base.get_profile_dimensions(user_id)
         return RetrievedContext(
             episodes=ctx.episodes,
             working=ctx.working,
@@ -205,6 +205,7 @@ class GraphMemory(Memory):
             commitments=commitments,
             reflection=ctx.reflection,
             traits=traits,
+            dimensions=dimensions,
         )
 
     # --- Phase 3: episodic lifecycle delegates verbatim to the base store -----
@@ -647,41 +648,35 @@ class GraphMemory(Memory):
     async def decrement_reflect_back_cooldown(self, user_id: str) -> None:
         await self._base.decrement_reflect_back_cooldown(user_id)
 
-    # --- Phase 7: earn / job-matching log (Postgres — delegate to base) -------
+    # --- Living profile: behavioral dimensions (Postgres — delegate to base) ---
 
-    async def log_job_recommendation(
-        self, user_id: str, job_id: str, *, follow_up_after_days: int
-    ) -> str:
-        return await self._base.log_job_recommendation(
-            user_id, job_id, follow_up_after_days=follow_up_after_days
+    async def get_profile_dimensions(self, user_id: str) -> list[ProfileDimension]:
+        return await self._base.get_profile_dimensions(user_id)
+
+    async def put_profile_dimension(self, dimension: ProfileDimension) -> None:
+        await self._base.put_profile_dimension(dimension)
+
+    async def get_dimension_to_confirm(
+        self, user_id: str, session_id: str, *, min_confidence: float, min_observations: int
+    ) -> ProfileDimension | None:
+        return await self._base.get_dimension_to_confirm(
+            user_id, session_id, min_confidence=min_confidence, min_observations=min_observations
         )
 
-    async def get_recommended_job_ids(self, user_id: str) -> list[str]:
-        return await self._base.get_recommended_job_ids(user_id)
+    async def confirm_dimension(
+        self, user_id: str, dimension: str, *, confidence_bump: float, session_id: str | None = None
+    ) -> None:
+        await self._base.confirm_dimension(
+            user_id, dimension, confidence_bump=confidence_bump, session_id=session_id
+        )
 
-    async def get_job_recommendations(self, user_id: str) -> list[JobRecommendation]:
-        return await self._base.get_job_recommendations(user_id)
+    async def correct_dimension(
+        self, user_id: str, dimension: str, *, session_id: str | None = None
+    ) -> None:
+        await self._base.correct_dimension(user_id, dimension, session_id=session_id)
 
-    async def mark_job_recommendation_delivered(self, rec_id: str) -> None:
-        await self._base.mark_job_recommendation_delivered(rec_id)
-
-    async def get_due_job_followup(self, user_id: str) -> JobRecommendation | None:
-        return await self._base.get_due_job_followup(user_id)
-
-    async def mark_job_followup_sent(self, rec_id: str) -> None:
-        await self._base.mark_job_followup_sent(rec_id)
-
-    async def get_pending_job_followup(self, user_id: str) -> JobRecommendation | None:
-        return await self._base.get_pending_job_followup(user_id)
-
-    async def update_job_outcome(self, rec_id: str, outcome: JobOutcome) -> None:
-        await self._base.update_job_outcome(rec_id, outcome)
-
-    async def set_job_active(self, user_id: str, active: bool = True) -> None:
-        await self._base.set_job_active(user_id, active)
-
-    async def get_job_active(self, user_id: str) -> bool:
-        return await self._base.get_job_active(user_id)
+    async def mark_dimension_surfaced(self, user_id: str, dimension: str, session_id: str) -> None:
+        await self._base.mark_dimension_surfaced(user_id, dimension, session_id)
 
     async def _current(self, user_id: str, node_type: NodeType) -> list[GraphNode]:
         if self._graph is None:

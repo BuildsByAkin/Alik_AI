@@ -52,33 +52,32 @@ CREATE TABLE IF NOT EXISTS reflect_back_cooldown (
     remaining int  NOT NULL DEFAULT 0
 );
 
--- Phase 7 (earn/job matching): one row per job recommendation delivered to a user.
--- Lifecycle is one OPEN thread per user — a row with outcome IS NULL blocks new
--- recommendations until it resolves. follow_up_after schedules the 3-day check-back;
--- follow_up_sent_at marks the follow-up check-in as queued; outcome is set from the
--- user's follow-up reply (tried_liked | tried_disliked | not_tried | loved_it).
-CREATE TABLE IF NOT EXISTS job_recommendations_log (
-    id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id          text        NOT NULL,
-    job_id           text        NOT NULL,
-    recommended_at   timestamptz NOT NULL DEFAULT now(),
-    delivered_at     timestamptz,            -- null = queued but not yet shown
-    follow_up_after  timestamptz,            -- when the 3-day follow-up becomes eligible
-    follow_up_sent_at timestamptz,           -- null = follow-up not yet queued
-    outcome          text                    -- null = open thread; set at follow-up
+-- Living profile (behavioral layer): one row per (user, taxonomy axis). The dominant
+-- value + accumulating confidence + observation_count paint a stable picture over time;
+-- status separates CONFIRMED dimensions from ones still needing a gentle check.
+-- provenance (episode/signal ids) is mandatory, mirroring InferredTraits.
+CREATE TABLE IF NOT EXISTS profile_dimensions (
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id             text        NOT NULL,
+    dimension           text        NOT NULL,   -- taxonomy axis (alik.profile.TAXONOMY)
+    value               text        NOT NULL,   -- taxonomy value for that axis
+    content             text        NOT NULL,   -- human sentence (drives the soft-confirm question)
+    confidence          real        NOT NULL DEFAULT 0,
+    observation_count   int         NOT NULL DEFAULT 1,
+    status              text        NOT NULL DEFAULT 'unconfirmed',  -- unconfirmed|confirmed|corrected
+    surfaced_in_session text,                   -- last session we soft-confirmed it in
+    source_session_id   text,                   -- session a confirm/correct was stated in
+    provenance          jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    valid_from          timestamptz NOT NULL DEFAULT now(),  -- first observed
+    last_observed_at    timestamptz NOT NULL DEFAULT now(),
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (user_id, dimension)
 );
 
--- Dedup (never recommend the same job twice) + newest-first lookups per user.
-CREATE INDEX IF NOT EXISTS idx_jobrec_user_job ON job_recommendations_log (user_id, job_id);
-CREATE INDEX IF NOT EXISTS idx_jobrec_user_recommended
-    ON job_recommendations_log (user_id, recommended_at DESC);
+CREATE INDEX IF NOT EXISTS idx_profile_dim_user ON profile_dimensions (user_id);
 
--- Phase 7: per-user job engagement flag (the brain has no user-profile table — profiles
--- live in the separate auth service). Set true once a user tries a recommendation and likes it.
-CREATE TABLE IF NOT EXISTS user_job_state (
-    user_id    text PRIMARY KEY,
-    job_active boolean NOT NULL DEFAULT false
-);
+-- Job matching (recommendation log + engagement flag) moved OUT of the brain into the
+-- standalone matching microservice (services/matching), which owns its own Postgres.
 
 -- Phase 5 (commitment lifecycle) lives in FalkorDB (schemaless), documented here:
 --   Commitment node props: status (pending|due|resolved_kept|resolved_dropped),

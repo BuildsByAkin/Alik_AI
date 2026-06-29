@@ -12,7 +12,7 @@ from fastapi import FastAPI
 
 from .config import server_settings
 from .models import HealthResponse
-from .routes import auth, profile
+from .routes import auth, internal, profile
 from .supabase_client import get_anon_client, get_service_client
 
 
@@ -29,6 +29,7 @@ app = FastAPI(title="alik Auth + Profile Service", version="0.1.0", lifespan=lif
 
 app.include_router(auth.router)
 app.include_router(profile.router)
+app.include_router(internal.router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["health"])

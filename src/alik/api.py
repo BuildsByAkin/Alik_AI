@@ -2,20 +2,38 @@
 
 from __future__ import annotations
 
+import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from alik.auth_client import AuthClient
 from alik.companion import Companion
 from alik.config import Settings
 from alik.extraction import Extractor
 from alik.llm import AnthropicLLM
+from alik.matching_client import MatchingClient
 from alik.memory.base import Memory
 from alik.memory.graph import GraphMemory
+from alik.models import TraitStatus
 from alik.prompt import load_persona
 from alik.scheduler import start_scheduler
+
+
+def _check_service_token(request: Request, x_service_token: str | None) -> None:
+    """Guard service-to-service reads (e.g. matching pulling the profile).
+
+    Enforced only when a service token is configured (so injected-test apps and local dev
+    without a token still work); when set, a mismatching/absent header is rejected.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    configured = settings.service_token.get_secret_value() if settings is not None else ""
+    if not configured:
+        return
+    if not x_service_token or not secrets.compare_digest(x_service_token, configured):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid service token")
 
 
 class ChatRequest(BaseModel):
@@ -28,9 +46,38 @@ class EndRequest(BaseModel):
     user_id: str
 
 
-def create_app(*, companion: Companion | None = None, memory: Memory | None = None) -> FastAPI:
-    """Build the app. Inject ``companion``/``memory`` for tests; otherwise they are
-    constructed from ``Settings`` at startup."""
+def _profile_payload(user_id: str, identity: dict | None, facts, traits, dimensions) -> dict:
+    """Serialize the assembled living profile for the Profile API (matching's input)."""
+    return {
+        "user_id": user_id,
+        "identity": identity,  # name/age/city/photo_url from auth, or None if unavailable
+        "facts": [{"key": f.key, "content": f.content} for f in facts],
+        "confirmed_traits": [
+            {"key": t.key, "content": t.content, "confidence": t.confidence} for t in traits
+        ],
+        "dimensions": [
+            {
+                "dimension": d.dimension,
+                "value": d.value,
+                "content": d.content,
+                "confidence": d.confidence,
+                "status": str(d.status),
+                "observation_count": d.observation_count,
+            }
+            for d in dimensions
+        ],
+    }
+
+
+def create_app(
+    *,
+    companion: Companion | None = None,
+    memory: Memory | None = None,
+    auth_client: AuthClient | None = None,
+    matching_client: MatchingClient | None = None,
+) -> FastAPI:
+    """Build the app. Inject ``companion``/``memory``/``auth_client``/``matching_client`` for
+    tests; otherwise they are constructed from ``Settings`` at startup."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -39,6 +86,7 @@ def create_app(*, companion: Companion | None = None, memory: Memory | None = No
             return
 
         settings = Settings()
+        app.state.settings = settings
         mem = await GraphMemory.connect(
             database_url=settings.database_url,
             redis_url=settings.redis_url,
@@ -61,13 +109,21 @@ def create_app(*, companion: Companion | None = None, memory: Memory | None = No
             model=settings.extraction_model,
             max_tokens=settings.extraction_max_tokens,
         )
+        token = settings.service_token.get_secret_value()
         app.state.memory = mem
+        app.state.auth_client = AuthClient(base_url=settings.auth_service_url, service_token=token)
+        app.state.matching_client = (
+            MatchingClient(base_url=settings.matching_service_url, service_token=token)
+            if settings.matching_service_url
+            else None
+        )
         app.state.companion = Companion(
             memory=mem,
             llm=llm,
             persona=load_persona(settings.persona_path),
             episode_limit=settings.episode_retrieve_limit,
             extractor=Extractor(llm=extraction_llm, memory=mem),
+            matching_client=app.state.matching_client,
         )
         # Nightly sleep pass — best-effort (skips cleanly if APScheduler absent).
         app.state.scheduler = start_scheduler(mem, extraction_llm, settings)
@@ -77,6 +133,9 @@ def create_app(*, companion: Companion | None = None, memory: Memory | None = No
             if app.state.scheduler is not None:
                 app.state.scheduler.shutdown(wait=False)
             await app.state.companion.drain()  # let in-flight extractions finish
+            await app.state.auth_client.aclose()
+            if app.state.matching_client is not None:
+                await app.state.matching_client.aclose()
             await mem.aclose()
 
     app = FastAPI(title="alik", lifespan=lifespan)
@@ -84,6 +143,10 @@ def create_app(*, companion: Companion | None = None, memory: Memory | None = No
         app.state.companion = companion
     if memory is not None:
         app.state.memory = memory
+    if auth_client is not None:
+        app.state.auth_client = auth_client
+    if matching_client is not None:
+        app.state.matching_client = matching_client
 
     @app.post("/chat")
     async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
@@ -101,10 +164,41 @@ def create_app(*, companion: Companion | None = None, memory: Memory | None = No
         summary = await companion.end_session(req.user_id, session_id)
         return {"summary": summary}
 
+    @app.get("/users/{user_id}/profile")
+    async def get_profile(
+        user_id: str, request: Request, x_service_token: str | None = Header(default=None)
+    ) -> dict:
+        """The assembled living profile — identity (auth) + facts + confirmed traits +
+        behavioral dimensions. The single rich picture the matching service consumes."""
+        _check_service_token(request, x_service_token)
+        memory: Memory = request.app.state.memory
+        auth: AuthClient | None = getattr(request.app.state, "auth_client", None)
+        facts = (
+            await memory.get_current_facts(user_id) if hasattr(memory, "get_current_facts") else []
+        )
+        all_traits = (
+            await memory.get_current_traits(user_id)
+            if hasattr(memory, "get_current_traits")
+            else []
+        )
+        traits = [t for t in all_traits if t.status is TraitStatus.CONFIRMED]
+        dimensions = await memory.get_profile_dimensions(user_id)
+        identity = await auth.get_profile(user_id) if auth is not None else None
+        return _profile_payload(user_id, identity, facts, traits, dimensions)
+
     @app.delete("/users/{user_id}")
     async def delete_user(user_id: str, request: Request) -> dict:
+        """Cross-service account erasure: the brain's own memory, then the auth and matching
+        services. Loud and idempotent — if any backend can't erase, we raise rather than
+        report a partial success; re-running after recovery completes the erasure."""
         memory: Memory = request.app.state.memory
+        auth: AuthClient | None = getattr(request.app.state, "auth_client", None)
+        matching: MatchingClient | None = getattr(request.app.state, "matching_client", None)
         await memory.delete(user_id)
+        if auth is not None:
+            await auth.delete_user(user_id)
+        if matching is not None:
+            await matching.delete_user(user_id)
         return {"deleted": user_id}
 
     return app

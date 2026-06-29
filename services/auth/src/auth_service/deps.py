@@ -6,12 +6,30 @@ decode the JWT ourselves. A missing/invalid token yields 401.
 
 from __future__ import annotations
 
-from fastapi import Depends, HTTPException, status
+import secrets
+
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .config import server_settings
 from .supabase_client import get_anon_client
 
 _bearer = HTTPBearer(auto_error=False)
+
+
+async def verify_service_token(x_service_token: str | None = Header(default=None)) -> None:
+    """Gate the service-to-service /internal endpoints with the shared secret.
+
+    Fails closed: if no token is configured, every request is rejected. Constant-time
+    compare to avoid leaking the secret via timing.
+    """
+    configured = server_settings.service_token.get_secret_value()
+    if (
+        not configured
+        or not x_service_token
+        or not secrets.compare_digest(x_service_token, configured)
+    ):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid service token")
 
 
 async def get_current_user(

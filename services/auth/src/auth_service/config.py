@@ -25,6 +25,10 @@ class ServerSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     port: int = 8001
+    # Shared secret for the service-to-service /internal endpoints (the brain calls these
+    # to read identity for the living profile and to coordinate account erasure). When
+    # empty, the /internal endpoints reject every request (fail closed).
+    service_token: SecretStr = SecretStr("")
 
 
 settings = Settings()

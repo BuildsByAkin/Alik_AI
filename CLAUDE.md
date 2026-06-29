@@ -27,6 +27,11 @@ the BRAIN FIRST IN TEXT; voice is the final phase and just an I/O swap.
 - Phase 3 ✓ — nightly sleep pass (promote/resolve/decay/reflect)
 - Phase 4 ✓ — pattern layer + reflect-back (live verified)
 - Phase 5 ✓ — commitment lifecycle + proactivity engine (live verified)
+- Phase 7 ✓ — earn / job-matching. EXTRACTED to the `services/matching/` microservice (own
+  Postgres on 5433, port 8002); the brain only delivers + reports via `matching_client`.
+- Living profile ✓ Step 1 — behavioral-dimension layer + soft-confirm + Profile API +
+  cross-service delete (unit-tested; live gate pending).
+- Living profile ✓ Step 2 — job-matching microservice (above) consuming the Profile API.
 - Phase 6 — voice (half-cascade) (next)
 
 ## Open seams
@@ -183,3 +188,46 @@ the BRAIN FIRST IN TEXT; voice is the final phase and just an I/O swap.
   dup nodes; open counts Sara 20→3, Maya 15→7, David 16→5, James 3→1; mention_count on survivors
   (Maya's text-Carlos=5, glassblowing=5, sleep-checkpoint=4) confirms restatements collapsed
   into one node each, and the survivors are genuinely-distinct intents (no over-merge).
+- Living profile (Step 1): a STRUCTURED behavioral layer alongside the free-form InferredTrait
+  layer. Fixed taxonomy in `alik.profile.TAXONOMY` (detail_specificity, topic_focus,
+  interest_intensity, structure_preference, sensory_sensitivity, social_predictability_need);
+  add an axis/value/behavior-directive there and nothing else changes (detection prompt,
+  validation, behavior all read the table). ProfileDimension lives in POSTGRES (one row per
+  user+axis, behind the Memory ABC — NOT FalkorDB) so the Profile API and matching get reliable
+  reads even when the graph is down, and delete() erases it. The nightly `profile_pass` (sleep
+  step after tick) mirrors detect(): provenance-grounded, accumulates confidence via the pure
+  `apply_observation` (same value → diminishing-returns bump; competing value → switch if more
+  confident, else decay). CONFIRMED dimensions are corroborate-only (never clobbered, like
+  write_traits' confirmed guard); CORRECTED are left untouched (no nagging). Soft-confirm is
+  reflect-back's sibling for dimensions: a confident-enough UNCONFIRMED dimension is gently
+  surfaced in conversation (REFLECT_PROFILE_CONFIRM_SYSTEM); the reply → CONFIRMED or CORRECTED.
+  It SHARES reflect-back's cadence cooldown + the one-gentle-check-per-session guard (`_rb_done`)
+  so it never feels like an interview; reflect-back is tried first, profile-confirm only if it
+  doesn't fire. Behavior directives (alik.profile.behavior_directives) quietly adjust HOW the
+  companion shows up — injected into the prompt for CONFIRMED dims always + UNCONFIRMED dims ≥
+  profile_behavior_min_confidence — never said aloud, never a label.
+- Profile API + cross-service: GET /users/{id}/profile assembles identity (fetched from the
+  auth service via `auth_client`, graceful → None on failure) + facts + CONFIRMED traits +
+  dimensions; this is the seam the matching service consumes (and guarded by the mesh service
+  token — see below). DELETE /users/{id} is a cross-service coordinator: brain Memory.delete
+  THEN auth `DELETE /internal/users/{id}` THEN matching `DELETE /users/{id}` — loud +
+  idempotent. Auth gained service-token-guarded `/internal/profiles/{id}` + `/internal/users/{id}`.
+  httpx is now a brain runtime dep.
+- Service mesh (one shared secret): brain `ALIK_SERVICE_TOKEN` == auth `SERVICE_TOKEN` ==
+  matching `SERVICE_TOKEN`. The brain sends it to auth + matching, and validates it on its own
+  /users/{id}/profile (the guard is OPTIONAL — enforced only when a token is configured, so
+  injected-test apps and tokenless local dev still work). Ports: brain 8000, auth 8001,
+  matching 8002; matching's own Postgres on host 5433.
+- Job-matching extraction (Step 2): `services/matching/` is a standalone FastAPI service (own
+  Postgres, own venv, NO LLM — scoring is deterministic). It is a pure consumer of the living
+  profile: `GET /match/{user_id}` reads the brain Profile API (facts + confirmed_traits), scores
+  the catalog (`data/jobs.json`, moved out of the brain), and owns the recommendation lifecycle
+  (log + cooldowns + one-open-thread + job_active) in its own store (`Store` ABC: `PgStore` +
+  `InMemoryStore`). The brain keeps ONLY delivery glue: `sleep_pass.match_jobs/check_job_followups`
+  ask the service and queue a `pending_checkin`; the companion delivers the opener, shares the
+  link on "yes", classifies the follow-up reply and POSTs the outcome (the service flips
+  job_active for liked/loved). The follow-through EmotionalSignal still lands in the BRAIN's
+  pattern layer (engagement state lives in matching). `CheckinType.JOB_*` + `JobOutcome` +
+  `JOB_OUTCOME_CLASSIFY_SYSTEM` stay in the brain (delivery/classification); `JobRecommendation`,
+  `job_matcher.py`, the job memory methods, the job Postgres tables, and `data/jobs.json` were
+  REMOVED from the brain. Matching is disabled cleanly when `matching_service_url` is empty.
