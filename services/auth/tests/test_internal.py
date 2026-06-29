@@ -17,7 +17,8 @@ PROFILE_ROW = {
     "id": "uid-7",
     "name": "Avery",
     "age": 31,
-    "city": "Lagos",
+    "city": "Minneapolis",
+    "state": "MN",
     "photo_url": None,
     "created_at": "2026-06-26T10:00:00+00:00",
     "updated_at": "2026-06-26T10:00:00+00:00",
@@ -49,6 +50,21 @@ def test_internal_get_profile_ok(client, fake_service: FakeClient, monkeypatch) 
     assert resp.status_code == 200
     assert resp.json()["id"] == "uid-7"
     assert resp.json()["age"] == 31
+
+
+def test_internal_list_users_by_state(client, fake_service: FakeClient, monkeypatch) -> None:
+    _set_token(monkeypatch)
+    fake_service.set_table_result("profiles", [{"id": "u1"}, {"id": "u2"}])
+
+    resp = client.get("/internal/users?state=MN", headers={"X-Service-Token": TOKEN})
+
+    assert resp.status_code == 200
+    assert resp.json() == ["u1", "u2"]
+
+
+def test_internal_list_users_requires_token(client, monkeypatch) -> None:
+    _set_token(monkeypatch)
+    assert client.get("/internal/users?state=MN").status_code == 401
 
 
 def test_internal_delete_user_hard_erases(client, fake_service: FakeClient, monkeypatch) -> None:

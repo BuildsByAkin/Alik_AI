@@ -30,7 +30,8 @@ def test_signup_happy_path(client: TestClient, fake_anon: FakeClient) -> None:
             "password": "hunter2hunter2",
             "name": "Avery",
             "age": 31,
-            "city": "Lagos",
+            "city": "Minneapolis",
+            "state": "MN",
         },
     )
 
@@ -51,12 +52,30 @@ def test_signup_under_25_blocked(client: TestClient) -> None:
             "password": "hunter2hunter2",
             "name": "Kit",
             "age": 24,
-            "city": "Lagos",
+            "city": "Minneapolis",
+            "state": "MN",
         },
     )
 
     assert resp.status_code == 403
     assert resp.json()["detail"] == "alik is for people 25 and older"
+
+
+def test_signup_unsupported_state_blocked(client: TestClient) -> None:
+    resp = client.post(
+        "/auth/signup",
+        json={
+            "email": "tx@b.com",
+            "password": "hunter2hunter2",
+            "name": "Tex",
+            "age": 31,
+            "city": "Austin",
+            "state": "TX",
+        },
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "alik isn't available in your state yet"
 
 
 def test_login_happy_path(client: TestClient, fake_anon: FakeClient) -> None:

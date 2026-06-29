@@ -16,6 +16,13 @@ MIN_AGE = 25
 AGE_BLOCK_MESSAGE = "alik is for people 25 and older"
 PHOTO_BUCKET = "profile-photos"
 
+# alik launches one state at a time. The frontend only offers launched states, but we gate
+# here too (defense in depth): a state outside this set is rejected. Add a state to go live
+# there — no other code change needed. The mobile app separately verifies the user's live
+# device location is in the state they picked before calling signup; we store only the state.
+LAUNCH_STATES = {"MN"}
+STATE_BLOCK_MESSAGE = "alik isn't available in your state yet"
+
 
 async def signup(req: SignupRequest) -> TokenResponse:
     """Create the auth user + profile row atomically, returning a live session.
@@ -25,6 +32,10 @@ async def signup(req: SignupRequest) -> TokenResponse:
     """
     if req.age < MIN_AGE:
         raise HTTPException(status.HTTP_403_FORBIDDEN, AGE_BLOCK_MESSAGE)
+
+    state = req.state.strip().upper()
+    if state not in LAUNCH_STATES:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, STATE_BLOCK_MESSAGE)
 
     anon = await get_anon_client()
     try:
@@ -50,6 +61,7 @@ async def signup(req: SignupRequest) -> TokenResponse:
                     "name": req.name,
                     "age": req.age,
                     "city": req.city,
+                    "state": state,
                 }
             )
             .execute()

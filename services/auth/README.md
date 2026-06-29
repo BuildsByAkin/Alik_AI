@@ -51,6 +51,7 @@ create table public.profiles (
   name        text not null,
   age         int  not null check (age >= 25),
   city        text not null,
+  state       text not null,  -- 2-letter US state code; launch gate + matching pool
   photo_url   text,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now()
@@ -89,6 +90,13 @@ create policy "auth update own photo" on storage.objects
   for update using (bucket_id = 'profile-photos' and auth.role() = 'authenticated');
 ```
 
+> **Already created `profiles`?** Add the `state` column without dropping data:
+> ```sql
+> alter table public.profiles add column state text;          -- nullable first
+> update public.profiles set state = 'MN' where state is null; -- backfill existing rows
+> alter table public.profiles alter column state set not null;
+> ```
+
 ## Run
 
 ```bash
@@ -103,7 +111,7 @@ curl localhost:8001/health        # -> {"status":"ok"}
 | Method | Path | Auth | Body | Returns |
 |---|---|---|---|---|
 | `GET` | `/health` | — | — | `{ status: "ok" }` |
-| `POST` | `/auth/signup` | — | `{email, password, name, age, city}` | `{access_token, refresh_token, user_id}` (201). `age<25` → **403** "alik is for people 25 and older" |
+| `POST` | `/auth/signup` | — | `{email, password, name, age, city, state}` | `{access_token, refresh_token, user_id}` (201). `age<25` → **403**; a state alik hasn't launched in → **403** "alik isn't available in your state yet" |
 | `POST` | `/auth/login` | — | `{email, password}` | `{access_token, refresh_token, user_id}` |
 | `POST` | `/auth/logout` | Bearer | — | 204 |
 | `POST` | `/auth/refresh` | — | `{refresh_token}` | `{access_token, refresh_token, user_id}` |

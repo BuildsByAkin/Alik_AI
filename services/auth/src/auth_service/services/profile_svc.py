@@ -28,6 +28,16 @@ async def get_profile(user_id: str) -> ProfileResponse:
     return ProfileResponse(**resp.data)
 
 
+async def list_user_ids_by_state(state: str) -> list[str]:
+    """All user ids whose profile is in ``state`` — the connections service's ingest roster."""
+    service = await get_service_client()
+    try:
+        resp = await service.table("profiles").select("id").eq("state", state).execute()
+    except Exception as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Could not list users") from exc
+    return [row["id"] for row in (resp.data or [])]
+
+
 async def update_profile(user_id: str, update: ProfileUpdate) -> ProfileResponse:
     # Only name/city are editable; drop unset fields so we never null a column by accident.
     changes = update.model_dump(exclude_none=True)

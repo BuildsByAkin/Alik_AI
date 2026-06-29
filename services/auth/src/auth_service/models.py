@@ -18,6 +18,7 @@ class SignupRequest(BaseModel):
     name: str
     age: int
     city: str
+    state: str  # 2-letter US state code; gated to the states alik has launched in.
 
 
 class LoginRequest(BaseModel):
@@ -36,7 +37,8 @@ class TokenResponse(BaseModel):
 
 
 class ProfileUpdate(BaseModel):
-    # age and email are not editable after signup, so they are intentionally absent.
+    # age, email, and state are not editable after signup (state drives the launch gate +
+    # matching pool and is location-verified at signup), so they are intentionally absent.
     name: str | None = None
     city: str | None = None
 
@@ -46,6 +48,7 @@ class ProfileResponse(BaseModel):
     name: str
     age: int
     city: str
+    state: str
     photo_url: str | None = None
     created_at: datetime
     updated_at: datetime

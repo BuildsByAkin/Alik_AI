@@ -25,6 +25,13 @@ async def internal_get_profile(user_id: str) -> ProfileResponse:
     return await profile_svc.get_profile(user_id)
 
 
+@router.get("/users")
+async def internal_list_users(state: str) -> list[str]:
+    """User ids whose profile is in ``state`` (2-letter code). The roster the connections
+    (people-matching) service ingests from — auth owns who exists and where."""
+    return await profile_svc.list_user_ids_by_state(state.strip().upper())
+
+
 @router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def internal_delete_user(user_id: str) -> None:
     """Hard-erase the user (photo + profile row + auth user) — same loud erasure as

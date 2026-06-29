@@ -10,7 +10,8 @@ PROFILE_ROW = {
     "id": "uid-1",
     "name": "Avery",
     "age": 31,
-    "city": "Lagos",
+    "city": "Minneapolis",
+    "state": "MN",
     "photo_url": None,
     "created_at": "2026-06-26T10:00:00+00:00",
     "updated_at": "2026-06-26T10:00:00+00:00",
@@ -27,9 +28,19 @@ def test_get_profile_returns_correct_shape(
 
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"id", "name", "age", "city", "photo_url", "created_at", "updated_at"}
+    assert set(body) == {
+        "id",
+        "name",
+        "age",
+        "city",
+        "state",
+        "photo_url",
+        "created_at",
+        "updated_at",
+    }
     assert body["id"] == "uid-1"
     assert body["age"] == 31
+    assert body["state"] == "MN"
     assert body["photo_url"] is None
 
 
