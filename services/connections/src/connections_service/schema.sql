@@ -94,3 +94,18 @@ CREATE TABLE IF NOT EXISTS match_state (
     PRIMARY KEY (user_id, candidate_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ms_user_status ON match_state (user_id, status);
+
+-- Part 6: a clustered group of mutually-compatible people who share a specific activity.
+-- member_ids is sorted; the unique index dedups a re-found group (upsert keeps id + status).
+CREATE TABLE IF NOT EXISTS group_candidates (
+    group_id         text        PRIMARY KEY,   -- uuid4().hex
+    interest_node_id text        NOT NULL,
+    member_ids       text[]      NOT NULL,
+    mean_score       real        NOT NULL,
+    status           text        NOT NULL,       -- proposed | surfacing | surfaced | declined
+    created_at       timestamptz NOT NULL DEFAULT now(),
+    updated_at       timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gc_members ON group_candidates (interest_node_id, member_ids);
+CREATE INDEX IF NOT EXISTS idx_gc_status ON group_candidates (status);
+CREATE INDEX IF NOT EXISTS idx_gc_members_gin ON group_candidates USING gin (member_ids);

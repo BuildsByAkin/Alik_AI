@@ -62,6 +62,9 @@ class CheckinType(StrEnum):
     JOB_RECOMMENDATION = "job_recommendation"  # Phase 7: a paid-work match worth a warm mention
     JOB_FOLLOWUP = "job_followup"  # Phase 7: follow up on a recommendation already delivered
     PEOPLE_MATCH = "people_match"  # the connections service found someone to introduce (Part 5)
+    PEOPLE_MATCH_GROUP = (
+        "people_match_group"  # ...or a small group around a shared activity (Part 6)
+    )
 
 
 class JobOutcome(StrEnum):

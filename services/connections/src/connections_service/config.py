@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     max_surface_per_pass: int = 1
     surface_shared_interests: int = 3  # how many shared interests to send in the checkin payload.
 
+    # Group clustering (Part 6). Lower score bar than 1:1 — shared activity carries weight.
+    cluster_cron: str = "0 5 * * *"  # nightly, one hour after surface.
+    min_group_size: int = 3
+    max_group_size: int = 5
+    group_score_threshold: float = 0.5  # every pair in a group must score at/above this.
+    group_decline_threshold: int = 1  # this many declines decline the whole group (1 = any).
+
     # Age-handling knob — default OFF. 25+ is gated at signup; the kernel must not read age.
     age_filter_mode: AgeFilterMode = AgeFilterMode.OFF
 

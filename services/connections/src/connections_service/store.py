@@ -20,6 +20,8 @@ from connections_service.models import (
     DimensionMatch,
     DimensionSnapshot,
     EvalResult,
+    GroupCandidate,
+    GroupStatus,
     InterestEdge,
     InterestMatch,
     InterestNode,
@@ -160,6 +162,36 @@ class Store(ABC):
         """would_click + final_confidence >= threshold, joined to the kernel score/explanation,
         excluding already-shown users (stub), highest final_confidence first. Read by Part 5."""
 
+    # --- Part 6: group clustering -------------------------------------------------
+    @abstractmethod
+    async def get_clusterable_interest_nodes(self, state: str, min_users: int) -> list[str]:
+        """Specific interest nodes (excl. :_general) with >= min_users pool_ready users in state."""
+
+    @abstractmethod
+    async def get_pairwise_scores(self, user_ids: list[str]) -> dict[frozenset[str], float]:
+        """Symmetric candidate scores among the set (max per unordered pair)."""
+
+    @abstractmethod
+    async def get_skipped_pairs(self, user_ids: list[str]) -> set[frozenset[str]]:
+        """Pairs in the set where either side skipped the other in match_state."""
+
+    @abstractmethod
+    async def save_group_candidate(self, group: GroupCandidate) -> None:
+        """Upsert a group; on (interest, members) conflict keep group_id + status, refresh score."""
+
+    @abstractmethod
+    async def get_group_candidate(self, group_id: str) -> GroupCandidate | None: ...
+
+    @abstractmethod
+    async def get_proposed_groups(self) -> list[GroupCandidate]: ...
+
+    @abstractmethod
+    async def update_group_status(self, group_id: str, status: GroupStatus) -> None: ...
+
+    @abstractmethod
+    async def get_surfaced_group_member_ids(self, interest_node_id: str) -> list[frozenset[str]]:
+        """Member sets of surfacing/surfaced groups for this interest (overlap dedup)."""
+
     @abstractmethod
     async def delete_user(self, user_id: str) -> None:
         """Erase ALL of this service's data for the user (cross-service deletion seam)."""
@@ -176,6 +208,7 @@ class InMemoryStore(Store):
         self._candidates: dict[tuple[str, str], CandidateScore] = {}
         self._evals: dict[tuple[str, str], EvalResult] = {}
         self._match: dict[tuple[str, str], MatchStateEntry] = {}
+        self._groups: dict[str, GroupCandidate] = {}
         for node in interests.all_interest_nodes():
             self._nodes[node.id] = node
 
@@ -253,6 +286,68 @@ class InMemoryStore(Store):
                 entry, status=status, responded_at=responded_at
             )
 
+    async def get_clusterable_interest_nodes(self, state: str, min_users: int) -> list[str]:
+        per_node: dict[str, set[str]] = {}
+        for uid, edges in self._interests.items():
+            entry = self._pool.get(uid)
+            if not (entry and entry.pool_ready and entry.state == state):
+                continue
+            for e in edges:
+                if e.interest_node_id.endswith(":_general"):
+                    continue
+                per_node.setdefault(e.interest_node_id, set()).add(uid)
+        return sorted(n for n, users in per_node.items() if len(users) >= min_users)
+
+    async def get_pairwise_scores(self, user_ids: list[str]) -> dict[frozenset[str], float]:
+        ids = set(user_ids)
+        out: dict[frozenset[str], float] = {}
+        for (a, b), cand in self._candidates.items():
+            if a in ids and b in ids and a != b:
+                key = frozenset((a, b))
+                out[key] = max(out.get(key, 0.0), cand.score)
+        return out
+
+    async def get_skipped_pairs(self, user_ids: list[str]) -> set[frozenset[str]]:
+        ids = set(user_ids)
+        return {
+            frozenset((u, c))
+            for (u, c), m in self._match.items()
+            if u in ids and c in ids and m.status is MatchStatus.SKIPPED
+        }
+
+    async def save_group_candidate(self, group: GroupCandidate) -> None:
+        members = frozenset(group.member_ids)
+        now = datetime.now(UTC)
+        for gid, g in self._groups.items():
+            if g.interest_node_id == group.interest_node_id and frozenset(g.member_ids) == members:
+                self._groups[gid] = replace(g, mean_score=group.mean_score, updated_at=now)
+                return
+        self._groups[group.group_id] = replace(
+            group,
+            member_ids=sorted(group.member_ids),
+            created_at=group.created_at or now,
+            updated_at=now,
+        )
+
+    async def get_group_candidate(self, group_id: str) -> GroupCandidate | None:
+        return self._groups.get(group_id)
+
+    async def get_proposed_groups(self) -> list[GroupCandidate]:
+        return [g for g in self._groups.values() if g.status is GroupStatus.PROPOSED]
+
+    async def update_group_status(self, group_id: str, status: GroupStatus) -> None:
+        g = self._groups.get(group_id)
+        if g is not None:
+            self._groups[group_id] = replace(g, status=status, updated_at=datetime.now(UTC))
+
+    async def get_surfaced_group_member_ids(self, interest_node_id: str) -> list[frozenset[str]]:
+        return [
+            frozenset(g.member_ids)
+            for g in self._groups.values()
+            if g.interest_node_id == interest_node_id
+            and g.status in (GroupStatus.SURFACING, GroupStatus.SURFACED)
+        ]
+
     async def save_eval_result(self, result: EvalResult) -> None:
         stamped = result if result.evaled_at else replace(result, evaled_at=datetime.now(UTC))
         self._evals[(result.user_id_a, result.user_id_b)] = stamped
@@ -296,6 +391,7 @@ class InMemoryStore(Store):
         }
         self._evals = {(a, b): e for (a, b), e in self._evals.items() if user_id not in (a, b)}
         self._match = {(u, c): m for (u, c), m in self._match.items() if user_id not in (u, c)}
+        self._groups = {gid: g for gid, g in self._groups.items() if user_id not in g.member_ids}
 
 
 class PgStore(Store):
@@ -576,6 +672,103 @@ class PgStore(Store):
                 responded_at,
             )
 
+    async def get_clusterable_interest_nodes(self, state: str, min_users: int) -> list[str]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT ui.interest_node_id FROM user_interests ui "
+                "JOIN users_pool p ON p.user_id = ui.user_id "
+                "WHERE p.state = $1 AND p.pool_ready "
+                "AND split_part(ui.interest_node_id, ':', 2) <> '_general' "
+                "GROUP BY ui.interest_node_id "
+                "HAVING count(DISTINCT ui.user_id) >= $2 ORDER BY ui.interest_node_id",
+                state,
+                min_users,
+            )
+        return [r["interest_node_id"] for r in rows]
+
+    async def get_pairwise_scores(self, user_ids: list[str]) -> dict[frozenset[str], float]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id_a, user_id_b, score FROM candidate_scores "
+                "WHERE user_id_a = ANY($1) AND user_id_b = ANY($1)",
+                user_ids,
+            )
+        out: dict[frozenset[str], float] = {}
+        for r in rows:
+            key = frozenset((r["user_id_a"], r["user_id_b"]))
+            out[key] = max(out.get(key, 0.0), r["score"])
+        return out
+
+    async def get_skipped_pairs(self, user_ids: list[str]) -> set[frozenset[str]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, candidate_id FROM match_state "
+                "WHERE status = 'skipped' AND user_id = ANY($1) AND candidate_id = ANY($1)",
+                user_ids,
+            )
+        return {frozenset((r["user_id"], r["candidate_id"])) for r in rows}
+
+    @staticmethod
+    def _group(row) -> GroupCandidate:
+        return GroupCandidate(
+            group_id=row["group_id"],
+            interest_node_id=row["interest_node_id"],
+            member_ids=list(row["member_ids"]),
+            mean_score=row["mean_score"],
+            status=GroupStatus(row["status"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    async def save_group_candidate(self, group: GroupCandidate) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO group_candidates "
+                "(group_id, interest_node_id, member_ids, mean_score, status) "
+                "VALUES ($1, $2, $3, $4, $5) "
+                "ON CONFLICT (interest_node_id, member_ids) DO UPDATE SET "
+                "mean_score = excluded.mean_score, updated_at = now()",
+                group.group_id,
+                group.interest_node_id,
+                sorted(group.member_ids),
+                group.mean_score,
+                str(group.status),
+            )
+
+    async def get_group_candidate(self, group_id: str) -> GroupCandidate | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT group_id, interest_node_id, member_ids, mean_score, status, "
+                "created_at, updated_at FROM group_candidates WHERE group_id = $1",
+                group_id,
+            )
+        return self._group(row) if row is not None else None
+
+    async def get_proposed_groups(self) -> list[GroupCandidate]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT group_id, interest_node_id, member_ids, mean_score, status, "
+                "created_at, updated_at FROM group_candidates WHERE status = 'proposed'"
+            )
+        return [self._group(r) for r in rows]
+
+    async def update_group_status(self, group_id: str, status: GroupStatus) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE group_candidates SET status = $2, updated_at = now() WHERE group_id = $1",
+                group_id,
+                str(status),
+            )
+
+    async def get_surfaced_group_member_ids(self, interest_node_id: str) -> list[frozenset[str]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT member_ids FROM group_candidates "
+                "WHERE interest_node_id = $1 AND status IN ('surfacing', 'surfaced')",
+                interest_node_id,
+            )
+        return [frozenset(r["member_ids"]) for r in rows]
+
     async def save_eval_result(self, result: EvalResult) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
@@ -674,6 +867,9 @@ class PgStore(Store):
             )
             await conn.execute(
                 "DELETE FROM match_state WHERE user_id = $1 OR candidate_id = $1", user_id
+            )
+            await conn.execute(
+                "DELETE FROM group_candidates WHERE member_ids @> ARRAY[$1]", user_id
             )
             await conn.execute("DELETE FROM users_pool WHERE user_id = $1", user_id)
 

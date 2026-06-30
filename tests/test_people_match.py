@@ -21,9 +21,13 @@ REASON = "they both light up about rock climbing and quiet weekends"
 class FakeConnections:
     def __init__(self) -> None:
         self.responses: list[tuple[str, str, bool]] = []
+        self.group_responses: list[tuple[str, str, bool]] = []
 
     async def post_match_response(self, user_id: str, candidate_id: str, accepted: bool) -> None:
         self.responses.append((user_id, candidate_id, accepted))
+
+    async def post_group_response(self, user_id: str, group_id: str, accepted: bool) -> None:
+        self.group_responses.append((user_id, group_id, accepted))
 
     async def aclose(self) -> None:
         pass
@@ -110,3 +114,61 @@ async def test_no_posts_skipped(user_id):
 
     await _consume(companion.respond(user_id, "S", "no thanks, not right now"))
     assert conn.responses == [(user_id, "cand-1", False)]
+
+
+GROUP_REASON = "a few people nearby are also really into running"
+
+
+async def _queue_group(mem, user_id, group_id="grp-1"):
+    await mem.queue_checkin(
+        PendingCheckin(
+            user_id=user_id,
+            checkin_type=CheckinType.PEOPLE_MATCH_GROUP,
+            message_hint=GROUP_REASON,
+            payload={
+                "type": "people_match_group",
+                "reason": GROUP_REASON,
+                "group_id": group_id,
+                "candidate_ids": ["b", "c"],
+                "shared_interest": "running",
+                "match_confidence": 0.7,
+            },
+        )
+    )
+
+
+async def test_group_opener_is_warm_not_clinical(user_id):
+    mem = _mem()
+    await _queue_group(mem, user_id)
+    llm = FakeLLM()
+    companion = _companion(mem, llm, FakeConnections())
+
+    opener = await companion.open_session(user_id, "S")
+    assert opener is not None
+    assert "mentioning a few people" in llm.last_system
+    assert GROUP_REASON in llm.last_system
+    assert "never use the words 'match' or 'group'" in llm.last_system
+    assert companion._group_checkin["S"] == "grp-1"
+
+
+async def test_group_yes_posts_accepted(user_id):
+    mem = _mem()
+    await _queue_group(mem, user_id)
+    conn = FakeConnections()
+    companion = _companion(mem, FakeLLM(), conn)
+    await companion.open_session(user_id, "S")
+
+    await _consume(companion.respond(user_id, "S", "yeah that sounds fun"))
+    assert conn.group_responses == [(user_id, "grp-1", True)]
+    assert "S" not in companion._group_checkin
+
+
+async def test_group_no_posts_declined(user_id):
+    mem = _mem()
+    await _queue_group(mem, user_id)
+    conn = FakeConnections()
+    companion = _companion(mem, FakeLLM(), conn)
+    await companion.open_session(user_id, "S")
+
+    await _consume(companion.respond(user_id, "S", "nah, not for me"))
+    assert conn.group_responses == [(user_id, "grp-1", False)]

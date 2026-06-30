@@ -213,3 +213,55 @@ class MatchResponse(BaseModel):
     user_id: str
     candidate_id: str
     accepted: bool
+
+
+# --- Part 6: group-awareness clustering -------------------------------------------------
+
+
+class GroupStatus(StrEnum):
+    """Lifecycle of a group candidate."""
+
+    PROPOSED = "proposed"  # clustering found it, not yet surfaced
+    SURFACING = "surfacing"  # check-ins to members in progress
+    SURFACED = "surfaced"  # all members received the intro
+    DECLINED = "declined"  # enough members said no (default: any one)
+
+
+@dataclass(frozen=True, slots=True)
+class GroupCandidate:
+    group_id: str
+    interest_node_id: str
+    member_ids: list[str]  # sorted (drives dedup)
+    mean_score: float
+    status: GroupStatus
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GroupCheckin:
+    """What we send the brain to introduce a member to the rest of a group."""
+
+    group_id: str
+    candidate_ids: list[str]  # the OTHER members (never self)
+    shared_interest: str
+    reason: str
+    match_confidence: float
+
+    def to_payload(self) -> dict:
+        return {
+            "type": "people_match_group",
+            "group_id": self.group_id,
+            "reason": self.reason,
+            "candidate_ids": list(self.candidate_ids),
+            "shared_interest": self.shared_interest,
+            "match_confidence": self.match_confidence,
+        }
+
+
+class GroupResponse(BaseModel):
+    """The companion's callback body for POST /matches/group-response."""
+
+    user_id: str
+    group_id: str
+    accepted: bool

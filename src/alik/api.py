@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from alik.auth_client import AuthClient
 from alik.companion import Companion
@@ -48,13 +48,14 @@ class EndRequest(BaseModel):
 
 
 class CheckinRequest(BaseModel):
-    """A people-match check-in queued by the connections service."""
+    """A people-match check-in queued by the connections service. One shape for both the 1:1
+    (people_match) and group (people_match_group) payloads — ``type`` distinguishes them, and
+    the extra fields each carries pass through to the stored payload."""
+
+    model_config = ConfigDict(extra="allow")
 
     type: str
     reason: str
-    candidate_id: str | None = None
-    shared_interests: list[str] = []
-    match_confidence: float | None = None
 
 
 def _profile_payload(user_id: str, identity: dict | None, facts, traits, dimensions) -> dict:
@@ -219,11 +220,16 @@ def create_app(
         companion delivers it (warmly, never as a 'match') at the next session."""
         _check_service_token(request, x_service_token)
         memory: Memory = request.app.state.memory
+        checkin_type = (
+            CheckinType.PEOPLE_MATCH_GROUP
+            if req.type == "people_match_group"
+            else CheckinType.PEOPLE_MATCH
+        )
         checkin_id = await memory.queue_checkin(
             PendingCheckin(
                 user_id=user_id,
-                checkin_type=CheckinType.PEOPLE_MATCH,
-                message_hint=req.reason,  # the EvalResult reason — the core of the opener
+                checkin_type=checkin_type,
+                message_hint=req.reason,  # the warm reason — the core of the opener
                 payload=req.model_dump(),
             )
         )

@@ -25,7 +25,7 @@ class ConnectionsClient:
         self._client = httpx.AsyncClient(timeout=timeout)
 
     async def post_match_response(self, user_id: str, candidate_id: str, accepted: bool) -> None:
-        """Report the user's yes/no to an introduction (best-effort)."""
+        """Report the user's yes/no to a 1:1 introduction (best-effort)."""
         try:
             resp = await self._client.post(
                 f"{self._base}/matches/response",
@@ -36,6 +36,20 @@ class ConnectionsClient:
         except Exception:
             logger.warning(
                 "match response post failed for %s->%s", user_id, candidate_id, exc_info=True
+            )
+
+    async def post_group_response(self, user_id: str, group_id: str, accepted: bool) -> None:
+        """Report the user's yes/no to a group introduction (best-effort)."""
+        try:
+            resp = await self._client.post(
+                f"{self._base}/matches/group-response",
+                headers=self._headers,
+                json={"user_id": user_id, "group_id": group_id, "accepted": accepted},
+            )
+            resp.raise_for_status()
+        except Exception:
+            logger.warning(
+                "group response post failed for %s (group %s)", user_id, group_id, exc_info=True
             )
 
     async def delete_user(self, user_id: str) -> None:

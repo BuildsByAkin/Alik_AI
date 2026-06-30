@@ -19,6 +19,7 @@ from fastapi import FastAPI
 
 from connections_service.auth_client import AuthClient
 from connections_service.brain_client import BrainClient
+from connections_service.cluster import clustering_pass
 from connections_service.config import settings
 from connections_service.eval import eval_pass
 from connections_service.ingest import run_ingest
@@ -54,11 +55,15 @@ def _start_scheduler(app: FastAPI):
     async def _surface_job() -> None:
         await surface_pass(app.state.store, app.state.brain_client, settings)
 
+    async def _cluster_job() -> None:
+        await clustering_pass(app.state.store, app.state.brain_client, settings)
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(_ingest_job, CronTrigger.from_crontab(settings.ingest_cron), id="ingest")
     scheduler.add_job(_score_job, CronTrigger.from_crontab(settings.score_cron), id="score")
     scheduler.add_job(_eval_job, CronTrigger.from_crontab(settings.eval_cron), id="eval")
     scheduler.add_job(_surface_job, CronTrigger.from_crontab(settings.surface_cron), id="surface")
+    scheduler.add_job(_cluster_job, CronTrigger.from_crontab(settings.cluster_cron), id="cluster")
     scheduler.start()
     return scheduler
 

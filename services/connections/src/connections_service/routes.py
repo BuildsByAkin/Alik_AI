@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, Request, status
 
 from connections_service.deps import verify_service_token
-from connections_service.models import MatchResponse, MatchStatus
+from connections_service.models import GroupResponse, GroupStatus, MatchResponse, MatchStatus
 from connections_service.store import Store
 
 router = APIRouter(dependencies=[Depends(verify_service_token)])
@@ -31,3 +31,15 @@ async def match_response(body: MatchResponse, request: Request) -> None:
     store: Store = request.app.state.store
     status_ = MatchStatus.ACCEPTED if body.accepted else MatchStatus.SKIPPED
     await store.update_match_status(body.user_id, body.candidate_id, status_, datetime.now(UTC))
+
+
+@router.post("/matches/group-response", status_code=status.HTTP_204_NO_CONTENT)
+async def group_response(body: GroupResponse, request: Request) -> None:
+    """A group member responded. Default threshold: any one decline declines the whole group;
+    an accept doesn't change status (the lifecycle has no terminal 'accepted')."""
+    if body.accepted:
+        return
+    store: Store = request.app.state.store
+    group = await store.get_group_candidate(body.group_id)
+    if group is not None and group.status is not GroupStatus.DECLINED:
+        await store.update_group_status(body.group_id, GroupStatus.DECLINED)

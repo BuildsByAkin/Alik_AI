@@ -111,6 +111,7 @@ class Companion:
         # surfaced; capture the yes/no and post it back. None → never delivered (graceful).
         self._connections = connections_client
         self._match_checkin: dict[str, str] = {}  # session_id -> candidate_id awaiting a reply
+        self._group_checkin: dict[str, str] = {}  # session_id -> group_id awaiting a reply
 
     async def respond(self, user_id: str, session_id: str, user_message: str) -> AsyncIterator[str]:
         """Stream a reply, appending both turns to the live buffer."""
@@ -152,6 +153,11 @@ class Companion:
         if session_id in self._match_checkin:
             match_directive = await self._handle_match_response(user_id, session_id, user_message)
 
+        # If a group introduction is open, this message is their yes/no to it.
+        group_directive: str | None = None
+        if session_id in self._group_checkin:
+            group_directive = await self._handle_group_response(user_id, session_id, user_message)
+
         ctx = await self._memory.retrieve(user_id, session_id, episode_limit=self._episode_limit)
         system = build_system_prompt(
             self._persona,
@@ -166,6 +172,8 @@ class Companion:
             system += f"\n\n{job_directive}"
         if match_directive:
             system += f"\n\n{match_directive}"
+        if group_directive:
+            system += f"\n\n{group_directive}"
 
         # One gentle check per session: prefer a reflect-back question, else a profile
         # soft-confirm. Both share the cadence cooldown so it never feels like an interview.
@@ -443,10 +451,15 @@ class Companion:
             elif checkin.checkin_type is CheckinType.JOB_FOLLOWUP:
                 await self._setup_job_followup(user_id, session_id)
         # Arm the people-match reply capture so the next turn's yes/no is posted back.
-        if checkin.checkin_type is CheckinType.PEOPLE_MATCH and self._connections is not None:
-            candidate_id = (checkin.payload or {}).get("candidate_id")
-            if candidate_id:
-                self._match_checkin[session_id] = candidate_id
+        if self._connections is not None and (checkin.payload or {}):
+            if checkin.checkin_type is CheckinType.PEOPLE_MATCH:
+                candidate_id = checkin.payload.get("candidate_id")
+                if candidate_id:
+                    self._match_checkin[session_id] = candidate_id
+            elif checkin.checkin_type is CheckinType.PEOPLE_MATCH_GROUP:
+                group_id = checkin.payload.get("group_id")
+                if group_id:
+                    self._group_checkin[session_id] = group_id
         return opener
 
     # --- Job recommendation delivery + lifecycle (via the matching microservice) ----
@@ -456,6 +469,17 @@ class Companion:
     @staticmethod
     def _opening_directive(checkin_type: CheckinType, hint: str) -> str:
         """Choose the opener brief for a queued check-in — warmer for job/people types."""
+        if checkin_type is CheckinType.PEOPLE_MATCH_GROUP:
+            return (
+                "Open this conversation yourself — warm and natural, like a good friend "
+                "mentioning a few people you've come across who are into the same thing they "
+                "love and who you think they'd genuinely enjoy spending time with. This is NOT "
+                "an app and NOT a 'group we formed': never use the words 'match' or 'group', and "
+                "never mention an app, a system, an algorithm, or that anything was computed. In "
+                "one or two sentences bring it up grounded in this private note: "
+                f'"{hint}". End by gently seeing whether they\'d be open to all getting together '
+                "— light and no-pressure."
+            )
         if checkin_type is CheckinType.PEOPLE_MATCH:
             return (
                 "Open this conversation yourself — warm and natural, like a good friend "
@@ -622,6 +646,23 @@ class Companion:
             return (
                 "They're open to meeting them. Warmly let them know you'll help make the "
                 "introduction happen — no pressure, no logistics yet."
+            )
+        return None
+
+    async def _handle_group_response(
+        self, user_id: str, session_id: str, user_message: str
+    ) -> str | None:
+        """A light yes/no read of the user's reply to a group introduction, posted back to
+        connections. Single-shot — always clears the per-session state."""
+        group_id = self._group_checkin.pop(session_id, None)
+        if group_id is None or self._connections is None:
+            return None
+        accepted = self._is_affirmative(user_message)
+        await self._connections.post_group_response(user_id, group_id, accepted)
+        if accepted:
+            return (
+                "They're up for meeting the others. Warmly let them know you'll help set it up "
+                "— light, no logistics yet."
             )
         return None
 

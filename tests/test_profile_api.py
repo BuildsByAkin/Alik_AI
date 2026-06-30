@@ -191,3 +191,26 @@ async def test_queue_people_match_checkin(user_id):
     assert str(queued.checkin_type) == "people_match"
     assert queued.message_hint == "they both light up about climbing"
     assert queued.payload["candidate_id"] == "cand-1"
+
+
+async def test_queue_group_checkin(user_id):
+    mem = _mem()
+    client = _app(mem, _FakeAuthClient())
+
+    resp = client.post(
+        f"/users/{user_id}/checkins",
+        json={
+            "type": "people_match_group",
+            "reason": "a few people nearby are also into running",
+            "group_id": "grp-1",
+            "candidate_ids": ["b", "c"],
+            "shared_interest": "running",
+            "match_confidence": 0.7,
+        },
+    )
+
+    assert resp.status_code == 200
+    queued = await mem.get_pending_checkin(user_id)
+    assert str(queued.checkin_type) == "people_match_group"
+    assert queued.payload["group_id"] == "grp-1"
+    assert queued.payload["candidate_ids"] == ["b", "c"]
