@@ -131,3 +131,85 @@ class CandidateScore:
     human_review_flag: bool
     explanation: KernelExplanation
     scored_at: datetime | None = None
+
+
+# --- Part 4: the LLM cross-evaluation's output -----------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EvalResult:
+    """The LLM's judgment on a directed pair, combined with the kernel confidence."""
+
+    user_id_a: str
+    user_id_b: str
+    would_click: bool
+    llm_confidence: float
+    final_confidence: float  # kernel_conf_weight*kernel + llm_conf_weight*llm (computed on save)
+    reason: str
+    eval_model: str
+    flag_for_review: bool = False
+    flag_reason: str | None = None
+    evaled_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SurfaceableMatch:
+    """A match ready for Part 5 to introduce: kernel + LLM signals + the structured 'why'."""
+
+    user_id_a: str
+    user_id_b: str
+    kernel_score: float
+    llm_confidence: float
+    final_confidence: float
+    reason: str
+    explanation: KernelExplanation
+
+
+# --- Part 5: surfacing + match state ----------------------------------------------------
+
+
+class MatchStatus(StrEnum):
+    """Lifecycle of a surfaced pair (the subject's view of one candidate)."""
+
+    PENDING = "pending"  # decided to surface, not yet queued (transient; not persisted)
+    SHOWN = "shown"  # PendingCheckin queued in the brain; companion will deliver it
+    ACCEPTED = "accepted"  # user said yes through the companion
+    SKIPPED = "skipped"  # user said no / delivered-no-response
+
+
+@dataclass(frozen=True, slots=True)
+class MatchStateEntry:
+    user_id: str
+    candidate_id: str
+    status: MatchStatus
+    checkin_id: str | None = None  # the brain PendingCheckin id
+    surfaced_at: datetime | None = None
+    responded_at: datetime | None = None
+    created_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class MatchCheckin:
+    """What we send the brain to queue a people-match opener (the EvalResult reason is the core)."""
+
+    candidate_id: str
+    reason: str
+    shared_interests: list[str]
+    match_confidence: float
+
+    def to_payload(self) -> dict:
+        return {
+            "type": "people_match",
+            "reason": self.reason,
+            "candidate_id": self.candidate_id,
+            "shared_interests": list(self.shared_interests),
+            "match_confidence": self.match_confidence,
+        }
+
+
+class MatchResponse(BaseModel):
+    """The companion's callback body for POST /matches/response."""
+
+    user_id: str
+    candidate_id: str
+    accepted: bool

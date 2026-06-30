@@ -43,8 +43,27 @@ class Settings(BaseSettings):
     top_n_candidates: int = 10
     score_cron: str = "0 2 * * *"  # nightly, after ingest.
 
-    # Cross-evaluation model (Part 4; cheap/Haiku-class, never hardcoded).
-    llm_model: str = "claude-haiku-4-5-20251001"
+    # LLM cross-evaluation (Part 4). Model is env-configurable, never hardcoded.
+    anthropic_api_key: SecretStr = SecretStr("")
+    eval_model: str = "claude-haiku-4-5-20251001"
+    eval_max_tokens: int = 512
+    eval_cron: str = "0 3 * * *"  # nightly, one hour after scoring.
+    min_kernel_score: float = 0.45  # only cross-eval candidates at/above this kernel score.
+    eval_top_n: int = 5  # ...and only the top N per user.
+    # final_confidence = kernel_conf_weight*kernel + llm_conf_weight*llm.
+    kernel_conf_weight: float = 0.6
+    llm_conf_weight: float = 0.4
+    # A match surfaces when would_click AND final_confidence >= surface_threshold.
+    surface_threshold: float = 0.55
+    # Render a shared dimension only at/above this axis score; cap interests in a summary.
+    shared_dimension_threshold: float = 0.7
+    summary_max_interests: int = 8
+
+    # Surfacing (Part 5). One introduction at a time so the companion isn't flooded.
+    surface_cron: str = "0 4 * * *"  # nightly, one hour after eval.
+    max_surface_per_pass: int = 1
+    surface_shared_interests: int = 3  # how many shared interests to send in the checkin payload.
+
     # Age-handling knob — default OFF. 25+ is gated at signup; the kernel must not read age.
     age_filter_mode: AgeFilterMode = AgeFilterMode.OFF
 

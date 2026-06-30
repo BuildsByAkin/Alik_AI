@@ -62,3 +62,35 @@ CREATE TABLE IF NOT EXISTS candidate_scores (
     PRIMARY KEY (user_id_a, user_id_b)
 );
 CREATE INDEX IF NOT EXISTS idx_cand_a_score ON candidate_scores (user_id_a, score DESC);
+
+-- Part 4: the LLM cross-evaluation's verdict per directed pair. final_confidence combines the
+-- kernel and LLM confidences (computed on save). Upsert — refreshed on each eval run.
+CREATE TABLE IF NOT EXISTS eval_results (
+    user_id_a        text        NOT NULL,
+    user_id_b        text        NOT NULL,
+    would_click      boolean     NOT NULL,
+    llm_confidence   real        NOT NULL,
+    final_confidence real        NOT NULL,
+    reason           text        NOT NULL,
+    flag_for_review  boolean     NOT NULL DEFAULT false,
+    flag_reason      text,
+    eval_model       text        NOT NULL,
+    evaled_at        timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id_a, user_id_b)
+);
+CREATE INDEX IF NOT EXISTS idx_eval_surface ON eval_results (user_id_a, final_confidence DESC)
+    WHERE would_click = true;
+
+-- Part 5: every surfaced pair (the subject's view). status: shown (queued in the brain) ->
+-- accepted | skipped (user responded via the companion). Drives shown-exclusion everywhere.
+CREATE TABLE IF NOT EXISTS match_state (
+    user_id      text        NOT NULL,
+    candidate_id text        NOT NULL,
+    status       text        NOT NULL,
+    checkin_id   text,                       -- the brain PendingCheckin id
+    surfaced_at  timestamptz,
+    responded_at timestamptz,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, candidate_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ms_user_status ON match_state (user_id, status);

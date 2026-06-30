@@ -12,12 +12,13 @@ from pydantic import BaseModel
 from alik.auth_client import AuthClient
 from alik.companion import Companion
 from alik.config import Settings
+from alik.connections_client import ConnectionsClient
 from alik.extraction import Extractor
 from alik.llm import AnthropicLLM
 from alik.matching_client import MatchingClient
 from alik.memory.base import Memory
 from alik.memory.graph import GraphMemory
-from alik.models import TraitStatus
+from alik.models import CheckinType, PendingCheckin, TraitStatus
 from alik.prompt import load_persona
 from alik.scheduler import start_scheduler
 
@@ -44,6 +45,16 @@ class ChatRequest(BaseModel):
 
 class EndRequest(BaseModel):
     user_id: str
+
+
+class CheckinRequest(BaseModel):
+    """A people-match check-in queued by the connections service."""
+
+    type: str
+    reason: str
+    candidate_id: str | None = None
+    shared_interests: list[str] = []
+    match_confidence: float | None = None
 
 
 def _profile_payload(user_id: str, identity: dict | None, facts, traits, dimensions) -> dict:
@@ -75,9 +86,10 @@ def create_app(
     memory: Memory | None = None,
     auth_client: AuthClient | None = None,
     matching_client: MatchingClient | None = None,
+    connections_client: ConnectionsClient | None = None,
 ) -> FastAPI:
-    """Build the app. Inject ``companion``/``memory``/``auth_client``/``matching_client`` for
-    tests; otherwise they are constructed from ``Settings`` at startup."""
+    """Build the app. Inject ``companion``/``memory``/``auth_client``/``matching_client``/
+    ``connections_client`` for tests; otherwise they are constructed from ``Settings``."""
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -117,6 +129,11 @@ def create_app(
             if settings.matching_service_url
             else None
         )
+        app.state.connections_client = (
+            ConnectionsClient(base_url=settings.connections_service_url, service_token=token)
+            if settings.connections_service_url
+            else None
+        )
         app.state.companion = Companion(
             memory=mem,
             llm=llm,
@@ -124,6 +141,7 @@ def create_app(
             episode_limit=settings.episode_retrieve_limit,
             extractor=Extractor(llm=extraction_llm, memory=mem),
             matching_client=app.state.matching_client,
+            connections_client=app.state.connections_client,
         )
         # Nightly sleep pass — best-effort (skips cleanly if APScheduler absent).
         app.state.scheduler = start_scheduler(mem, extraction_llm, settings)
@@ -136,6 +154,8 @@ def create_app(
             await app.state.auth_client.aclose()
             if app.state.matching_client is not None:
                 await app.state.matching_client.aclose()
+            if app.state.connections_client is not None:
+                await app.state.connections_client.aclose()
             await mem.aclose()
 
     app = FastAPI(title="alik", lifespan=lifespan)
@@ -147,6 +167,8 @@ def create_app(
         app.state.auth_client = auth_client
     if matching_client is not None:
         app.state.matching_client = matching_client
+    if connections_client is not None:
+        app.state.connections_client = connections_client
 
     @app.post("/chat")
     async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
@@ -186,19 +208,45 @@ def create_app(
         identity = await auth.get_profile(user_id) if auth is not None else None
         return _profile_payload(user_id, identity, facts, traits, dimensions)
 
+    @app.post("/users/{user_id}/checkins")
+    async def queue_checkin(
+        user_id: str,
+        req: CheckinRequest,
+        request: Request,
+        x_service_token: str | None = Header(default=None),
+    ) -> dict:
+        """Service-to-service: the connections service queues a people-match opener. The
+        companion delivers it (warmly, never as a 'match') at the next session."""
+        _check_service_token(request, x_service_token)
+        memory: Memory = request.app.state.memory
+        checkin_id = await memory.queue_checkin(
+            PendingCheckin(
+                user_id=user_id,
+                checkin_type=CheckinType.PEOPLE_MATCH,
+                message_hint=req.reason,  # the EvalResult reason — the core of the opener
+                payload=req.model_dump(),
+            )
+        )
+        return {"checkin_id": checkin_id}
+
     @app.delete("/users/{user_id}")
     async def delete_user(user_id: str, request: Request) -> dict:
-        """Cross-service account erasure: the brain's own memory, then the auth and matching
-        services. Loud and idempotent — if any backend can't erase, we raise rather than
-        report a partial success; re-running after recovery completes the erasure."""
+        """Cross-service account erasure: the brain's own memory, then the auth, matching, and
+        connections services. Loud and idempotent — if any backend can't erase, we raise rather
+        than report a partial success; re-running after recovery completes the erasure."""
         memory: Memory = request.app.state.memory
         auth: AuthClient | None = getattr(request.app.state, "auth_client", None)
         matching: MatchingClient | None = getattr(request.app.state, "matching_client", None)
+        connections: ConnectionsClient | None = getattr(
+            request.app.state, "connections_client", None
+        )
         await memory.delete(user_id)
         if auth is not None:
             await auth.delete_user(user_id)
         if matching is not None:
             await matching.delete_user(user_id)
+        if connections is not None:
+            await connections.delete_user(user_id)
         return {"deleted": user_id}
 
     return app

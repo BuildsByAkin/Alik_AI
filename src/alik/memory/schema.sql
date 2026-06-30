@@ -34,11 +34,14 @@ CREATE TABLE IF NOT EXISTS pending_checkins (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id       text        NOT NULL,
     commitment_id text,                     -- null = non-commitment check-in
-    checkin_type  text        NOT NULL,     -- due_commitment | upcoming_commitment | general_checkin | job_recommendation | job_followup
+    checkin_type  text        NOT NULL,     -- due/upcoming_commitment | general_checkin | job_* | people_match
     message_hint  text        NOT NULL,     -- what the companion should open with
+    payload       jsonb,                    -- structured data for richer check-ins (Part 5 people_match)
     created_at    timestamptz NOT NULL DEFAULT now(),
     delivered_at  timestamptz               -- null = not yet delivered
 );
+-- Part 5: add the payload column to a pre-existing table (idempotent).
+ALTER TABLE pending_checkins ADD COLUMN IF NOT EXISTS payload jsonb;
 
 -- Drives "get the undelivered check-in for a user".
 CREATE INDEX IF NOT EXISTS idx_checkins_user_delivered

@@ -627,8 +627,8 @@ class GraphMemory(Memory):
 
     # --- Phase 5: proactive check-in queue (delegates to the Postgres base) ----
 
-    async def queue_checkin(self, checkin: PendingCheckin) -> None:
-        await self._base.queue_checkin(checkin)
+    async def queue_checkin(self, checkin: PendingCheckin) -> str:
+        return await self._base.queue_checkin(checkin)
 
     async def get_pending_checkin(self, user_id: str) -> PendingCheckin | None:
         return await self._base.get_pending_checkin(user_id)

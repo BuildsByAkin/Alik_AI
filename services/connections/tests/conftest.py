@@ -23,6 +23,8 @@ class FakeBrain:
 
     def __init__(self) -> None:
         self.profiles: dict[str, dict | None] = {}
+        self.queued: list[tuple[str, object]] = []  # (user_id, MatchCheckin) for queue_checkin
+        self.checkin_id: str | None = "ck1"  # set to None to simulate a queue failure
 
     def set(self, user_id: str, profile: dict | None) -> None:
         self.profiles[user_id] = profile
@@ -37,6 +39,10 @@ class FakeBrain:
             "confirmed_traits": [],
             "dimensions": [],
         }
+
+    async def queue_checkin(self, user_id: str, checkin) -> str | None:
+        self.queued.append((user_id, checkin))
+        return self.checkin_id
 
     async def aclose(self) -> None:
         pass

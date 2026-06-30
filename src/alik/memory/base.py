@@ -88,8 +88,8 @@ class Memory(ABC):
     # --- Phase 5: proactive check-in queue ------------------------------------
 
     @abstractmethod
-    async def queue_checkin(self, checkin: PendingCheckin) -> None:
-        """Persist a queued proactive opener (one undelivered per user — enforced upstream)."""
+    async def queue_checkin(self, checkin: PendingCheckin) -> str:
+        """Persist a queued proactive opener; returns its id (one undelivered per user)."""
 
     @abstractmethod
     async def get_pending_checkin(self, user_id: str) -> PendingCheckin | None:

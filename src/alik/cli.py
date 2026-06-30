@@ -8,6 +8,7 @@ import uuid
 
 from alik.companion import Companion
 from alik.config import Settings
+from alik.connections_client import ConnectionsClient
 from alik.extraction import Extractor
 from alik.llm import AnthropicLLM
 from alik.matching_client import MatchingClient
@@ -46,6 +47,14 @@ async def _run() -> None:
         if settings.matching_service_url
         else None
     )
+    connections = (
+        ConnectionsClient(
+            base_url=settings.connections_service_url,
+            service_token=settings.service_token.get_secret_value(),
+        )
+        if settings.connections_service_url
+        else None
+    )
     companion = Companion(
         memory=memory,
         llm=llm,
@@ -62,6 +71,7 @@ async def _run() -> None:
         profile_behavior_min_confidence=settings.profile_behavior_min_confidence,
         profile_confirm_confidence_bump=settings.reflect_back_confidence_bump,
         matching_client=matching,
+        connections_client=connections,
     )
 
     print(f"alik — session {session_id} (user {user_id}). Type /quit to end.\n")
@@ -94,6 +104,8 @@ async def _run() -> None:
     finally:
         if matching is not None:
             await matching.aclose()
+        if connections is not None:
+            await connections.aclose()
         await memory.aclose()
 
 

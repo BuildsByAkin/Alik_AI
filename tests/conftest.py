@@ -189,9 +189,10 @@ class InMemoryMemory(Memory):
 
     # --- Phase 5: proactive check-in queue --------------------------------
 
-    async def queue_checkin(self, checkin: PendingCheckin) -> None:
+    async def queue_checkin(self, checkin: PendingCheckin) -> str:
         stamped = replace(checkin, created_at=checkin.created_at or datetime.now(UTC))
         self._checkins.append(stamped)
+        return stamped.id
 
     async def get_pending_checkin(self, user_id: str) -> PendingCheckin | None:
         undelivered = [c for c in self._checkins if c.user_id == user_id and c.delivered_at is None]

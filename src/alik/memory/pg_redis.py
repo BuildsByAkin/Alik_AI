@@ -278,21 +278,25 @@ class PgRedisMemory(Memory):
 
     # --- Phase 5: proactive check-in queue ------------------------------------
 
-    async def queue_checkin(self, checkin: PendingCheckin) -> None:
+    async def queue_checkin(self, checkin: PendingCheckin) -> str:
+        payload = json.dumps(checkin.payload) if checkin.payload is not None else None
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            checkin_id = await conn.fetchval(
                 "INSERT INTO pending_checkins "
-                "(user_id, commitment_id, checkin_type, message_hint) VALUES ($1, $2, $3, $4)",
+                "(user_id, commitment_id, checkin_type, message_hint, payload) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb) RETURNING id",
                 checkin.user_id,
                 checkin.commitment_id,
                 str(checkin.checkin_type),
                 checkin.message_hint,
+                payload,
             )
+        return str(checkin_id)
 
     async def get_pending_checkin(self, user_id: str) -> PendingCheckin | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, user_id, commitment_id, checkin_type, message_hint, "
+                "SELECT id, user_id, commitment_id, checkin_type, message_hint, payload, "
                 "created_at, delivered_at FROM pending_checkins "
                 "WHERE user_id = $1 AND delivered_at IS NULL "
                 "ORDER BY created_at DESC LIMIT 1",
@@ -300,11 +304,14 @@ class PgRedisMemory(Memory):
             )
         if row is None:
             return None
+        raw = row["payload"]
+        payload = json.loads(raw) if isinstance(raw, str) else raw
         return PendingCheckin(
             user_id=row["user_id"],
             checkin_type=CheckinType(row["checkin_type"]),
             message_hint=row["message_hint"],
             commitment_id=row["commitment_id"],
+            payload=payload,
             created_at=row["created_at"],
             delivered_at=row["delivered_at"],
             id=str(row["id"]),

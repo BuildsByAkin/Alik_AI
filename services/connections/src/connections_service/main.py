@@ -20,18 +20,21 @@ from fastapi import FastAPI
 from connections_service.auth_client import AuthClient
 from connections_service.brain_client import BrainClient
 from connections_service.config import settings
+from connections_service.eval import eval_pass
 from connections_service.ingest import run_ingest
 from connections_service.interests import all_interest_nodes
+from connections_service.llm import AnthropicLLM, LLMClient
 from connections_service.models import HealthResponse
 from connections_service.routes import router
 from connections_service.scoring import scoring_pass
 from connections_service.store import PgStore, Store
+from connections_service.surface import surface_pass
 
 logger = logging.getLogger("connections.main")
 
 
 def _start_scheduler(app: FastAPI):
-    """Start the ingest + scoring crons, or return None if APScheduler isn't installed."""
+    """Start the ingest + scoring + eval crons, or None if APScheduler isn't installed."""
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
@@ -45,9 +48,17 @@ def _start_scheduler(app: FastAPI):
     async def _score_job() -> None:
         await scoring_pass(app.state.store, settings)
 
+    async def _eval_job() -> None:
+        await eval_pass(app.state.store, app.state.llm, settings)
+
+    async def _surface_job() -> None:
+        await surface_pass(app.state.store, app.state.brain_client, settings)
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(_ingest_job, CronTrigger.from_crontab(settings.ingest_cron), id="ingest")
     scheduler.add_job(_score_job, CronTrigger.from_crontab(settings.score_cron), id="score")
+    scheduler.add_job(_eval_job, CronTrigger.from_crontab(settings.eval_cron), id="eval")
+    scheduler.add_job(_surface_job, CronTrigger.from_crontab(settings.surface_cron), id="surface")
     scheduler.start()
     return scheduler
 
@@ -57,6 +68,7 @@ def create_app(
     store: Store | None = None,
     brain_client: BrainClient | None = None,
     auth_client: AuthClient | None = None,
+    llm: LLMClient | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -69,6 +81,11 @@ def create_app(
         await app.state.store.ensure_interest_nodes(all_interest_nodes())
         app.state.brain_client = BrainClient(base_url=settings.brain_url, service_token=token)
         app.state.auth_client = AuthClient(base_url=settings.auth_url, service_token=token)
+        app.state.llm = AnthropicLLM(
+            api_key=settings.anthropic_api_key.get_secret_value(),
+            model=settings.eval_model,
+            max_tokens=settings.eval_max_tokens,
+        )
         app.state.scheduler = _start_scheduler(app)
         try:
             yield
@@ -87,6 +104,8 @@ def create_app(
         app.state.brain_client = brain_client
     if auth_client is not None:
         app.state.auth_client = auth_client
+    if llm is not None:
+        app.state.llm = llm
 
     @app.get("/health", response_model=HealthResponse, tags=["health"])
     async def health() -> HealthResponse:

@@ -51,13 +51,28 @@ class _FakeAuthClient:
         pass
 
 
+class _FakeConnectionsClient:
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    async def delete_user(self, user_id: str) -> None:
+        self.deleted.append(user_id)
+
+    async def aclose(self) -> None:
+        pass
+
+
 def _mem() -> GraphMemory:
     return GraphMemory(base=InMemoryMemory(), graph=InMemoryGraphStore(), current_facts_limit=50)
 
 
-def _app(mem: GraphMemory, auth: _FakeAuthClient) -> TestClient:
+def _app(mem: GraphMemory, auth: _FakeAuthClient, connections=None) -> TestClient:
     companion = Companion(memory=mem, llm=_FakeLLM(), persona=load_persona(), episode_limit=10)
-    return TestClient(create_app(companion=companion, memory=mem, auth_client=auth))
+    return TestClient(
+        create_app(
+            companion=companion, memory=mem, auth_client=auth, connections_client=connections
+        )
+    )
 
 
 async def _seed(mem: GraphMemory, user_id: str) -> None:
@@ -138,15 +153,41 @@ async def test_profile_api_degrades_without_identity(user_id):
     assert body["dimensions"]  # the rest still assembles
 
 
-async def test_cross_service_delete_erases_brain_and_auth(user_id):
+async def test_cross_service_delete_erases_brain_auth_and_connections(user_id):
     mem = _mem()
     await _seed(mem, user_id)
     auth = _FakeAuthClient()
-    client = _app(mem, auth)
+    connections = _FakeConnectionsClient()
+    client = _app(mem, auth, connections)
 
     resp = client.delete(f"/users/{user_id}")
 
     assert resp.status_code == 200
     assert auth.deleted == [user_id]  # auth erasure invoked
+    assert connections.deleted == [user_id]  # connections erasure invoked (fan-out)
     assert await mem.get_profile_dimensions(user_id) == []  # brain erased
     assert await mem.get_current_facts(user_id) == []
+
+
+async def test_queue_people_match_checkin(user_id):
+    mem = _mem()
+    client = _app(mem, _FakeAuthClient())
+
+    resp = client.post(
+        f"/users/{user_id}/checkins",
+        json={
+            "type": "people_match",
+            "reason": "they both light up about climbing",
+            "candidate_id": "cand-1",
+            "shared_interests": ["rock climbing"],
+            "match_confidence": 0.74,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["checkin_id"]
+    queued = await mem.get_pending_checkin(user_id)
+    assert queued is not None
+    assert str(queued.checkin_type) == "people_match"
+    assert queued.message_hint == "they both light up about climbing"
+    assert queued.payload["candidate_id"] == "cand-1"

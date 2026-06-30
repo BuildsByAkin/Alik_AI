@@ -13,6 +13,8 @@ import logging
 
 import httpx
 
+from connections_service.models import MatchCheckin
+
 logger = logging.getLogger("connections.brain_client")
 
 _EMPTY = {"identity": None, "facts": [], "confirmed_traits": [], "dimensions": []}
@@ -45,6 +47,19 @@ class BrainClient:
     async def get_profile(self, user_id: str) -> dict:
         """Like ``fetch_profile`` but degrades to an all-empty profile on failure."""
         return await self.fetch_profile(user_id) or dict(_EMPTY)
+
+    async def queue_checkin(self, user_id: str, checkin: MatchCheckin) -> str | None:
+        """Queue a people-match opener in the brain. Returns the PendingCheckin id, or None on
+        failure (surface_pass then keeps no match_state and retries next pass)."""
+        url = f"{self._base}/users/{user_id}/checkins"
+        try:
+            resp = await self._client.post(url, headers=self._headers, json=checkin.to_payload())
+            resp.raise_for_status()
+        except Exception:
+            logger.warning("queue_checkin failed for %s", user_id, exc_info=True)
+            return None
+        body = resp.json()
+        return body.get("checkin_id") if isinstance(body, dict) else None
 
     async def aclose(self) -> None:
         await self._client.aclose()

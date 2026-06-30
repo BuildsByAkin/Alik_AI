@@ -61,6 +61,7 @@ class CheckinType(StrEnum):
     GENERAL_CHECKIN = "general_checkin"  # lapsed user; "how are things?", not a commitment
     JOB_RECOMMENDATION = "job_recommendation"  # Phase 7: a paid-work match worth a warm mention
     JOB_FOLLOWUP = "job_followup"  # Phase 7: follow up on a recommendation already delivered
+    PEOPLE_MATCH = "people_match"  # the connections service found someone to introduce (Part 5)
 
 
 class JobOutcome(StrEnum):
@@ -179,6 +180,7 @@ class PendingCheckin:
     checkin_type: CheckinType
     message_hint: str  # warm one-liner the companion opens with
     commitment_id: str | None = None  # null for general check-ins
+    payload: dict | None = None  # structured data for richer check-ins (e.g. a people_match)
     created_at: datetime | None = None
     delivered_at: datetime | None = None  # null = not yet delivered
     id: str = field(default_factory=lambda: uuid4().hex)

@@ -70,6 +70,7 @@ class Companion:
         profile_behavior_min_confidence: float = 0.75,
         profile_confirm_confidence_bump: float = 0.1,
         matching_client=None,
+        connections_client=None,
     ) -> None:
         self._memory = memory
         self._llm = llm
@@ -106,6 +107,10 @@ class Companion:
         # Job-checkin state (same in-process carve-out). session -> dict with
         # {"type": "recommendation"|"followup", "url": str|None, "rec_id": str|None}.
         self._job_checkin: dict[str, dict] = {}
+        # People-matching delivery (Part 5): introduce a candidate the connections service
+        # surfaced; capture the yes/no and post it back. None → never delivered (graceful).
+        self._connections = connections_client
+        self._match_checkin: dict[str, str] = {}  # session_id -> candidate_id awaiting a reply
 
     async def respond(self, user_id: str, session_id: str, user_message: str) -> AsyncIterator[str]:
         """Stream a reply, appending both turns to the live buffer."""
@@ -142,6 +147,11 @@ class Companion:
         if session_id in self._job_checkin:
             job_directive = await self._handle_job_response(user_id, session_id, user_message)
 
+        # If a people-match introduction is open, this message is their yes/no to it.
+        match_directive: str | None = None
+        if session_id in self._match_checkin:
+            match_directive = await self._handle_match_response(user_id, session_id, user_message)
+
         ctx = await self._memory.retrieve(user_id, session_id, episode_limit=self._episode_limit)
         system = build_system_prompt(
             self._persona,
@@ -154,6 +164,8 @@ class Companion:
         )
         if job_directive:
             system += f"\n\n{job_directive}"
+        if match_directive:
+            system += f"\n\n{match_directive}"
 
         # One gentle check per session: prefer a reflect-back question, else a profile
         # soft-confirm. Both share the cadence cooldown so it never feels like an interview.
@@ -430,6 +442,11 @@ class Companion:
                 await self._setup_job_recommendation(user_id, session_id, checkin.message_hint)
             elif checkin.checkin_type is CheckinType.JOB_FOLLOWUP:
                 await self._setup_job_followup(user_id, session_id)
+        # Arm the people-match reply capture so the next turn's yes/no is posted back.
+        if checkin.checkin_type is CheckinType.PEOPLE_MATCH and self._connections is not None:
+            candidate_id = (checkin.payload or {}).get("candidate_id")
+            if candidate_id:
+                self._match_checkin[session_id] = candidate_id
         return opener
 
     # --- Job recommendation delivery + lifecycle (via the matching microservice) ----
@@ -438,7 +455,17 @@ class Companion:
 
     @staticmethod
     def _opening_directive(checkin_type: CheckinType, hint: str) -> str:
-        """Choose the opener brief for a queued check-in — warmer for job types."""
+        """Choose the opener brief for a queued check-in — warmer for job/people types."""
+        if checkin_type is CheckinType.PEOPLE_MATCH:
+            return (
+                "Open this conversation yourself — warm and natural, like a good friend "
+                "casually mentioning someone you think they'd genuinely enjoy meeting. This is "
+                "NOT a dating app and NOT a 'match': never use the word 'match', and never "
+                "mention an app, a system, an algorithm, or that anything was computed. In one "
+                "or two sentences, bring the other person up grounded in what they share, using "
+                f'this private note as the heart of it: "{hint}". End by gently seeing whether '
+                "they'd be open to meeting them — light and no-pressure, not a formal question."
+            )
         if checkin_type is CheckinType.JOB_RECOMMENDATION:
             return (
                 "Open this conversation yourself, warmly, like a friend who just spotted an "
@@ -578,6 +605,25 @@ class Companion:
                 )
             ]
         )
+
+    # --- People-match introduction reply (via the connections microservice) ----------
+
+    async def _handle_match_response(
+        self, user_id: str, session_id: str, user_message: str
+    ) -> str | None:
+        """A light yes/no read of the user's reply to an introduction, posted back to
+        connections. Single-shot — always clears the per-session state."""
+        candidate_id = self._match_checkin.pop(session_id, None)
+        if candidate_id is None or self._connections is None:
+            return None
+        accepted = self._is_affirmative(user_message)
+        await self._connections.post_match_response(user_id, candidate_id, accepted)
+        if accepted:
+            return (
+                "They're open to meeting them. Warmly let them know you'll help make the "
+                "introduction happen — no pressure, no logistics yet."
+            )
+        return None
 
     def _clear_checkin(self, session_id: str) -> None:
         self._checkin_commitment.pop(session_id, None)

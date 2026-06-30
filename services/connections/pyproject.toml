@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "alik people-matching ('connections') microservice — compares users' profiles to broker real-life intros (port 8003)"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.40",
     "asyncpg>=0.30",
     "fastapi>=0.115",
     "httpx>=0.27",
@@ -18,6 +19,8 @@ scheduler = ["apscheduler>=3.10"]
 [project.scripts]
 connections-ingest = "connections_service.ingest:main"
 connections-score = "connections_service.scoring:main"
+connections-eval = "connections_service.eval:main"
+connections-surface = "connections_service.surface:main"
 
 [dependency-groups]
 dev = [
