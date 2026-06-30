@@ -13,10 +13,12 @@ Discipline (per the approved plan):
 from __future__ import annotations
 
 import logging
+import time
 
 from connections_service.config import Settings
 from connections_service.interests import all_interest_nodes, extract_interests
 from connections_service.models import DimensionSnapshot, UserPoolEntry
+from connections_service.passlog import format_pass_summary
 from connections_service.store import Store, now_utc
 
 logger = logging.getLogger("connections.ingest")
@@ -25,14 +27,29 @@ logger = logging.getLogger("connections.ingest")
 async def run_ingest(store: Store, brain_client, auth_client, settings: Settings) -> dict[str, int]:
     """Ingest every launch-state roster. Returns counts; never raises."""
     counts = {"ingested": 0, "below_floor": 0, "skipped": 0}
-    for state in sorted(settings.launch_states_set):
-        user_ids = await auth_client.list_user_ids(state)
-        for user_id in user_ids:
-            try:
-                counts[await _ingest_one(user_id, store, brain_client, settings)] += 1
-            except Exception:
-                logger.exception("connections ingest failed for user %s", user_id)
-    logger.info("connections ingest complete: %s", counts)
+    failures = 0  # summary-only; the returned counts dict stays stable for callers/tests.
+    start = time.perf_counter()
+    try:
+        for state in sorted(settings.launch_states_set):
+            user_ids = await auth_client.list_user_ids(state)
+            for user_id in user_ids:
+                try:
+                    counts[await _ingest_one(user_id, store, brain_client, settings)] += 1
+                except Exception:
+                    failures += 1
+                    logger.exception("connections ingest failed for user %s", user_id)
+    finally:
+        # pool_ready: count upserted as pool_ready THIS run (renamed from the spec's
+        # `pool_ready_new` — we don't diff prior state, so it's a per-run count, not a delta).
+        logger.info(
+            format_pass_summary(
+                "ingest",
+                users_processed=sum(counts.values()) + failures,
+                failures=failures,
+                pool_ready=counts["ingested"],
+                duration_s=round(time.perf_counter() - start, 1),
+            )
+        )
     return counts
 
 

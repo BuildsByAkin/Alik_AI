@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from connections_service.config import Settings
 from connections_service.interests import all_interest_nodes
@@ -21,6 +22,7 @@ from connections_service.models import (
     KernelExplanation,
     UserPoolEntry,
 )
+from connections_service.passlog import format_pass_summary
 
 logger = logging.getLogger("connections.eval")
 
@@ -253,40 +255,63 @@ def compute_final_confidence(
 async def eval_pass(store, llm, settings: Settings) -> dict[str, int]:
     """Cross-evaluate each pool_ready user's shortlist. Per-pair isolated; never raises."""
     counts = {"users": 0, "evaluated": 0, "skipped": 0}
-    for state in sorted(settings.launch_states_set):
-        pool = await store.get_pool_users(state)
-        by_id = {e.user_id: e for e in pool}
-        for entry in pool:
-            counts["users"] += 1
-            try:
-                candidates = await store.get_candidate_scores(entry.user_id)
-            except Exception:
-                logger.exception("connections eval: candidate read failed for %s", entry.user_id)
-                continue
-            shortlist = [
-                c
-                for c in candidates
-                if c.score >= settings.min_kernel_score and not c.human_review_flag
-            ][: settings.eval_top_n]
-            if not shortlist:
-                continue
-            a_summary = await _summary(store, entry, settings)
-            for cand in shortlist:
-                b_entry = by_id.get(cand.user_id_b)
-                if b_entry is None:  # candidate left the pool since scoring
-                    counts["skipped"] += 1
-                    continue
+    # summary-only locals; the returned counts dict stays stable for callers/tests. `failures`
+    # is the hard-error count (read/LLM-call exceptions) — a SUBSET of `skipped`. Malformed-JSON
+    # _SkipPair cases are clean skips by design, NOT counted here.
+    failures = 0
+    flagged = 0
+    start = time.perf_counter()
+    try:
+        for state in sorted(settings.launch_states_set):
+            pool = await store.get_pool_users(state)
+            by_id = {e.user_id: e for e in pool}
+            for entry in pool:
+                counts["users"] += 1
                 try:
-                    await _eval_pair(store, llm, settings, entry.user_id, a_summary, b_entry, cand)
-                    counts["evaluated"] += 1
-                except _SkipPair:
-                    counts["skipped"] += 1
+                    candidates = await store.get_candidate_scores(entry.user_id)
                 except Exception:
+                    failures += 1
                     logger.exception(
-                        "connections eval failed for %s->%s", entry.user_id, cand.user_id_b
+                        "connections eval: candidate read failed for %s", entry.user_id
                     )
-                    counts["skipped"] += 1
-    logger.info("connections eval complete: %s", counts)
+                    continue
+                shortlist = [
+                    c
+                    for c in candidates
+                    if c.score >= settings.min_kernel_score and not c.human_review_flag
+                ][: settings.eval_top_n]
+                if not shortlist:
+                    continue
+                a_summary = await _summary(store, entry, settings)
+                for cand in shortlist:
+                    b_entry = by_id.get(cand.user_id_b)
+                    if b_entry is None:  # candidate left the pool since scoring
+                        counts["skipped"] += 1
+                        continue
+                    try:
+                        flag = await _eval_pair(
+                            store, llm, settings, entry.user_id, a_summary, b_entry, cand
+                        )
+                        counts["evaluated"] += 1
+                        flagged += int(flag)
+                    except _SkipPair:
+                        counts["skipped"] += 1
+                    except Exception:
+                        failures += 1
+                        logger.exception(
+                            "connections eval failed for %s->%s", entry.user_id, cand.user_id_b
+                        )
+                        counts["skipped"] += 1
+    finally:
+        logger.info(
+            format_pass_summary(
+                "eval",
+                pairs_evaluated=counts["evaluated"],
+                llm_failures=failures,
+                flagged_for_review=flagged,
+                duration_s=round(time.perf_counter() - start, 1),
+            )
+        )
     return counts
 
 
@@ -304,7 +329,9 @@ async def _summary(store, entry: UserPoolEntry, settings: Settings) -> str:
     )
 
 
-async def _eval_pair(store, llm, settings, a_id, a_summary, b_entry, cand) -> None:
+async def _eval_pair(store, llm, settings, a_id, a_summary, b_entry, cand) -> bool:
+    """Evaluate one directed pair and persist the result. Returns whether the LLM flagged it
+    for human review (so the pass can count flagged results for its summary)."""
     b_summary = await _summary(store, b_entry, settings)
     shared = render_shared_signals(
         cand.explanation, shared_dimension_threshold=settings.shared_dimension_threshold
@@ -331,6 +358,7 @@ async def _eval_pair(store, llm, settings, a_id, a_summary, b_entry, cand) -> No
             flag_reason=parsed["flag_reason"],
         )
     )
+    return bool(parsed["flag_for_review"])
 
 
 def main() -> None:

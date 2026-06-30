@@ -5,10 +5,12 @@ kernel itself never touches the store. Runnable from APScheduler and the
 from __future__ import annotations
 
 import logging
+import time
 
 from connections_service.config import Settings
 from connections_service.kernel import MatchInput, kernel
 from connections_service.models import CandidateScore
+from connections_service.passlog import format_pass_summary
 from connections_service.store import Store
 
 logger = logging.getLogger("connections.scoring")
@@ -49,17 +51,30 @@ async def generate_candidates(
 async def scoring_pass(store: Store, settings: Settings) -> dict[str, int]:
     """Re-score every pool_ready user (replacing prior scores). Per-user isolated; never raises."""
     counts = {"users": 0, "scored": 0}
-    for state in sorted(settings.launch_states_set):
-        for entry in await store.get_pool_users(state):
-            try:
-                candidates = await generate_candidates(store, entry.user_id, state, settings)
-                for candidate in candidates:
-                    await store.save_candidate_score(candidate)
-                counts["users"] += 1
-                counts["scored"] += len(candidates)
-            except Exception:
-                logger.exception("connections scoring failed for user %s", entry.user_id)
-    logger.info("connections scoring complete: %s", counts)
+    failures = 0  # summary-only; the returned counts dict stays stable for callers/tests.
+    start = time.perf_counter()
+    try:
+        for state in sorted(settings.launch_states_set):
+            for entry in await store.get_pool_users(state):
+                try:
+                    candidates = await generate_candidates(store, entry.user_id, state, settings)
+                    for candidate in candidates:
+                        await store.save_candidate_score(candidate)
+                    counts["users"] += 1
+                    counts["scored"] += len(candidates)
+                except Exception:
+                    failures += 1
+                    logger.exception("connections scoring failed for user %s", entry.user_id)
+    finally:
+        logger.info(
+            format_pass_summary(
+                "score",
+                pairs_scored=counts["scored"],
+                users_processed=counts["users"] + failures,
+                failures=failures,
+                duration_s=round(time.perf_counter() - start, 1),
+            )
+        )
     return counts
 
 

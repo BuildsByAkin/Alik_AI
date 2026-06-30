@@ -8,10 +8,12 @@ candidate is recorded as ``shown`` so it's never re-surfaced. Per-user isolated;
 from __future__ import annotations
 
 import logging
+import time
 
 from connections_service.config import Settings
 from connections_service.eval import _interest_label
 from connections_service.models import MatchCheckin, MatchStateEntry, MatchStatus, SurfaceableMatch
+from connections_service.passlog import format_pass_summary
 from connections_service.store import Store, now_utc
 
 logger = logging.getLogger("connections.surface")
@@ -27,24 +29,42 @@ def _shared_interest_labels(match: SurfaceableMatch, count: int) -> list[str]:
 
 async def surface_pass(store: Store, brain_client, settings: Settings) -> dict[str, int]:
     counts = {"users": 0, "surfaced": 0, "skipped": 0}
-    for state in sorted(settings.launch_states_set):
-        for entry in await store.get_pool_users(state):
-            counts["users"] += 1
-            try:
-                matches = await store.get_surfaceable_matches(
-                    entry.user_id, state, surface_threshold=settings.surface_threshold
-                )
-            except Exception:
-                logger.exception("surface: surfaceable read failed for %s", entry.user_id)
-                continue
-            for match in matches[: settings.max_surface_per_pass]:
+    # summary-only; brain_failures = queue_checkin returned None (a SUBSET of skipped). Other
+    # surface exceptions stay in skipped + the logs, not here. counts dict unchanged for callers.
+    brain_failures = 0
+    start = time.perf_counter()
+    try:
+        for state in sorted(settings.launch_states_set):
+            for entry in await store.get_pool_users(state):
+                counts["users"] += 1
                 try:
-                    surfaced = await _surface_one(store, brain_client, settings, match)
-                    counts["surfaced" if surfaced else "skipped"] += 1
+                    matches = await store.get_surfaceable_matches(
+                        entry.user_id, state, surface_threshold=settings.surface_threshold
+                    )
                 except Exception:
-                    logger.exception("surface failed for %s->%s", match.user_id_a, match.user_id_b)
-                    counts["skipped"] += 1
-    logger.info("connections surface complete: %s", counts)
+                    logger.exception("surface: surfaceable read failed for %s", entry.user_id)
+                    continue
+                for match in matches[: settings.max_surface_per_pass]:
+                    try:
+                        if await _surface_one(store, brain_client, settings, match):
+                            counts["surfaced"] += 1
+                        else:
+                            counts["skipped"] += 1
+                            brain_failures += 1
+                    except Exception:
+                        logger.exception(
+                            "surface failed for %s->%s", match.user_id_a, match.user_id_b
+                        )
+                        counts["skipped"] += 1
+    finally:
+        logger.info(
+            format_pass_summary(
+                "surface",
+                checkins_queued=counts["surfaced"],
+                brain_failures=brain_failures,
+                duration_s=round(time.perf_counter() - start, 1),
+            )
+        )
     return counts
 
 

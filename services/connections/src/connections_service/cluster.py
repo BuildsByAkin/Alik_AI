@@ -8,11 +8,13 @@ Python, no new graph DB, no re-scoring, no LLM.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 from connections_service.config import Settings
 from connections_service.eval import _interest_label
 from connections_service.models import GroupCandidate, GroupCheckin, GroupStatus
+from connections_service.passlog import format_pass_summary
 from connections_service.store import Store
 
 logger = logging.getLogger("connections.cluster")
@@ -80,16 +82,30 @@ def _trim_to_size(members: set[str], scores: dict[frozenset[str], float], target
 
 async def clustering_pass(store: Store, brain_client, settings: Settings) -> dict[str, int]:
     counts = {"nodes": 0, "proposed": 0, "surfaced": 0}
-    for state in sorted(settings.launch_states_set):
-        for node in await store.get_clusterable_interest_nodes(state, settings.min_group_size):
-            counts["nodes"] += 1
-            try:
-                if await _cluster_node(store, settings, state, node):
-                    counts["proposed"] += 1
-            except Exception:
-                logger.exception("clustering failed for node %s", node)
-    counts["surfaced"] = await _surface_groups(store, brain_client, settings)
-    logger.info("connections clustering complete: %s", counts)
+    failures = 0  # summary-only (node-cluster + group-surface errors); counts dict unchanged.
+    start = time.perf_counter()
+    try:
+        for state in sorted(settings.launch_states_set):
+            for node in await store.get_clusterable_interest_nodes(state, settings.min_group_size):
+                counts["nodes"] += 1
+                try:
+                    if await _cluster_node(store, settings, state, node):
+                        counts["proposed"] += 1
+                except Exception:
+                    failures += 1
+                    logger.exception("clustering failed for node %s", node)
+        counts["surfaced"], surface_failures = await _surface_groups(store, brain_client, settings)
+        failures += surface_failures
+    finally:
+        logger.info(
+            format_pass_summary(
+                "cluster",
+                groups_proposed=counts["proposed"],
+                groups_surfaced=counts["surfaced"],
+                failures=failures,
+                duration_s=round(time.perf_counter() - start, 1),
+            )
+        )
     return counts
 
 
@@ -127,8 +143,10 @@ async def _cluster_node(store: Store, settings: Settings, state: str, node: str)
     return True
 
 
-async def _surface_groups(store: Store, brain_client, settings: Settings) -> int:
+async def _surface_groups(store: Store, brain_client, settings: Settings) -> tuple[int, int]:
+    """Queue group openers for every PROPOSED group. Returns (surfaced, failures)."""
     surfaced = 0
+    failures = 0
     for group in await store.get_proposed_groups():
         try:
             await store.update_group_status(group.group_id, GroupStatus.SURFACING)
@@ -154,8 +172,9 @@ async def _surface_groups(store: Store, brain_client, settings: Settings) -> int
             if all_queued:
                 surfaced += 1
         except Exception:
+            failures += 1
             logger.exception("group surfacing failed for %s", group.group_id)
-    return surfaced
+    return surfaced, failures
 
 
 def main() -> None:
