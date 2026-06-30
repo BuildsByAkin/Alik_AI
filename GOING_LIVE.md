@@ -1,6 +1,6 @@
 # Going live — operational checklist
 
-Read this top to bottom when you're ready to deploy. alik is **three services** that talk to
+Read this top to bottom when you're ready to deploy. alik is **four services** that talk to
 each other over HTTP:
 
 | Service | Path | Port | Datastore |
@@ -8,6 +8,7 @@ each other over HTTP:
 | Brain (companion + memory + living profile) | `src/alik/` | 8000 | Postgres 5432, Redis 6379, FalkorDB 6380 |
 | Auth + profile (identity) | `services/auth/` | 8001 | Supabase (its own project) |
 | Job matching | `services/matching/` | 8002 | Postgres 5433 |
+| Connections (people matching) | `services/connections/` | 8003 | Postgres 5434 |
 
 > Rule of thumb: each service has its **own venv and its own `.env`**. Run `uv sync` inside
 > each service directory before starting it.
@@ -50,6 +51,7 @@ return 401:
 | Brain | `ALIK_SERVICE_TOKEN` | `<MESH_TOKEN>` |
 | Auth | `SERVICE_TOKEN` | `<MESH_TOKEN>` |
 | Matching | `SERVICE_TOKEN` | `<MESH_TOKEN>` |
+| Connections | `SERVICE_TOKEN` | `<MESH_TOKEN>` |
 
 ### Brain — `.env` (prefix `ALIK_`)
 - [ ] `ALIK_ANTHROPIC_API_KEY` — **required** (the companion can't run without it).
@@ -60,6 +62,8 @@ return 401:
 - [ ] `ALIK_AUTH_SERVICE_URL` — e.g. `http://localhost:8001`
 - [ ] `ALIK_MATCHING_SERVICE_URL` — e.g. `http://localhost:8002` (leave **empty to disable job
       matching** entirely — everything else still works)
+- [ ] `ALIK_CONNECTIONS_SERVICE_URL` — e.g. `http://localhost:8003` (leave **empty to disable
+      people matching**; the brain's delete fan-out + checkin queueing then skip it)
 - [ ] (optional) `ALIK_COMPANION_MODEL`, `ALIK_EXTRACTION_MODEL`, `ALIK_PERSONA_PATH`
 
 ### Auth — `services/auth/.env` (`cp .env.example .env`)
@@ -73,13 +77,27 @@ return 401:
 - [ ] `SERVICE_TOKEN` — `<MESH_TOKEN>`
 - [ ] `PORT=8002`
 
+### Connections — `services/connections/.env` (`cp .env.example .env`)
+- [ ] `DATABASE_URL` — `postgresql://alik:alik@localhost:5434/connections`
+- [ ] `BRAIN_URL` — `http://localhost:8000` (reads the Profile API + queues check-ins)
+- [ ] `AUTH_URL` — `http://localhost:8001` (the ingest roster — who exists, by state)
+- [ ] `SERVICE_TOKEN` — `<MESH_TOKEN>`
+- [ ] `ANTHROPIC_API_KEY` — **required for `eval_pass`** (its own key; confirm billing scope —
+      separate from the brain's `ALIK_ANTHROPIC_API_KEY`)
+- [ ] `PORT=8003`
+- [ ] (optional) `EVAL_MODEL`, the five `*_CRON` schedules, `MIN/MAX_GROUP_SIZE`, thresholds
+
 ---
 
 ## 3. Supabase setup (auth service only, one-time)
 - [ ] In the Supabase dashboard: **Auth → Providers → Email → uncheck "Confirm email"**
       (so signup returns a live session immediately).
 - [ ] Run the schema SQL from `services/auth/README.md` ("Schema SQL") in the SQL editor —
-      creates the `profiles` table, RLS policies, and the `profile-photos` storage bucket.
+      creates the `profiles` table (incl. the **`state`** column), RLS policies, and the
+      `profile-photos` storage bucket.
+- [ ] **Already created `profiles` before the `state` column existed?** Run the `ALTER TABLE`
+      migration from `services/auth/README.md` ("Already created `profiles`?") to add `state`
+      (the launch gate + the connections roster both depend on it).
 
 ---
 
@@ -87,23 +105,27 @@ return 401:
 - [ ] `uv sync` (repo root — the brain)
 - [ ] `cd services/auth && uv sync`
 - [ ] `cd services/matching && uv sync`
+- [ ] `cd services/connections && uv sync`
 
 ---
 
 ## 5. Start the services
-Bring up all three (order isn't strict — cross-service calls are made lazily and the brain
-degrades gracefully if auth/matching are briefly unreachable):
+Bring up all four (order isn't strict — cross-service calls are made lazily and each service
+degrades gracefully if its peers are briefly unreachable):
 - [ ] Brain: `uv run uvicorn alik.api:app --port 8000`
 - [ ] Auth: `cd services/auth && uv run uvicorn auth_service.main:app --port 8001`
 - [ ] Matching: `cd services/matching && uv run uvicorn matching_service.main:app --port 8002`
+- [ ] Connections: `cd services/connections && uv run uvicorn connections_service.main:app --port 8003`
 
 ### Smoke test
 - [ ] `curl localhost:8000/...`  (brain has no /health; hit `/chat` or check logs start clean)
 - [ ] `curl localhost:8001/health`  → `{"status":"ok"}`
 - [ ] `curl localhost:8002/health`  → `{"status":"ok"}`
+- [ ] `curl localhost:8003/health`  → `{"status":"ok"}`
 - [ ] Mesh auth wired correctly (should be **401**, proving the guard is on):
   ```bash
-  curl -s -o /dev/null -w "%{http_code}\n" localhost:8002/match/anyuser   # -> 401 (no token)
+  curl -s -o /dev/null -w "%{http_code}\n" localhost:8002/match/anyuser              # -> 401
+  curl -s -o /dev/null -w "%{http_code}\n" -X DELETE localhost:8003/users/anyuser    # -> 401
   ```
 
 ---
@@ -118,12 +140,13 @@ degrades gracefully if auth/matching are briefly unreachable):
       profile read will reject matching). The brain's profile guard is only enforced **when the
       token is set** — so an empty token silently disables the guard (fine for local dev, **not**
       for production).
-- [ ] **Ports must be distinct**: 8000/8001/8002, Postgres 5432 (brain) vs 5433 (matching),
-      Redis 6379, FalkorDB 6380. The two Postgres instances are separate on purpose.
+- [ ] **Ports must be distinct**: 8000/8001/8002/8003, Postgres 5432 (brain) / 5433 (matching)
+      / 5434 (connections), Redis 6379, FalkorDB 6380. The three Postgres instances are separate
+      on purpose.
 - [ ] **`delete()` is loud by design.** `DELETE /users/{id}` on the brain erases brain memory,
-      then auth, then matching. If FalkorDB (or auth/matching) is unreachable it **raises** rather
-      than reporting partial success — re-run once everything is back; the ops are idempotent.
-      This is the right-to-erasure path; treat a failure as "not yet deleted."
+      then auth, then matching, then connections. If any backend is unreachable it **raises**
+      rather than reporting partial success — re-run once everything is back; the ops are
+      idempotent. This is the right-to-erasure path; treat a failure as "not yet deleted."
 - [ ] **Nightly sleep pass + hourly proactivity** run via APScheduler inside the brain process
       (optional dep). Confirm `apscheduler` is installed (`uv sync` with the `scheduler` extra) if
       you rely on automatic nightly profile/job passes; otherwise trigger `uv run alik-sleep`
@@ -131,6 +154,15 @@ degrades gracefully if auth/matching are briefly unreachable):
 - [ ] **Job catalog** lives at `services/matching/data/jobs.json` now (not in the brain). Add or
       edit jobs there; no code change needed. A malformed catalog fails the matching service
       loudly at startup.
+- [ ] **Connections needs the brain reachable** — both ways. Its scoring/eval read the brain
+      Profile API, and `surface_pass`/`cluster_pass` queue check-ins via the brain's
+      `POST /users/{id}/checkins`. If the brain API is down, those passes produce nothing that
+      cycle and retry next run (no state is written on a failed queue).
+- [ ] **`pending_checkins.payload` (jsonb) auto-applies** via the brain's `schema.sql` on connect
+      (idempotent `ALTER … ADD COLUMN IF NOT EXISTS`). Confirm the column exists before the first
+      `people_match` check-in is queued — it carries `candidate_id`/`group_id` for the callback.
+- [ ] **Connections has its own Anthropic key** (`ANTHROPIC_API_KEY`) used only by `eval_pass`.
+      Size/scope its billing + rate limits alongside (or separate from) the brain's own usage.
 
 ---
 
@@ -138,6 +170,7 @@ degrades gracefully if auth/matching are briefly unreachable):
 - [ ] Brain: `uv run pytest && uv run ruff check . && uv run ruff format --check src tests`
 - [ ] Auth: `cd services/auth && uv run pytest && uv run ruff check .`
 - [ ] Matching: `cd services/matching && uv run pytest && uv run ruff check .`
+- [ ] Connections: `cd services/connections && uv run pytest && uv run ruff check .`
   > The infra-touching brain tests skip automatically unless `ALIK_DATABASE_URL` /
   > `ALIK_REDIS_URL` (and `ALIK_FALKORDB_URL` for graph tests) are set — set them to run the
   > real-DB tests against docker-compose before going live.
@@ -150,4 +183,42 @@ degrades gracefully if auth/matching are briefly unreachable):
 - [ ] Confirm the assembled profile reads back:
       `curl -H "X-Service-Token: <MESH_TOKEN>" localhost:8000/users/<id>/profile`
 - [ ] Erase the test user end-to-end: `curl -X DELETE localhost:8000/users/<id>` → confirm the
-      profile, auth account, and matching data are all gone.
+      profile, auth account, matching, **and connections** data are all gone (do one real
+      end-to-end deletion against staging — the fan-out is unit-tested with a fake client only).
+
+---
+
+## 9. Connections service (people-matching) — extra launch steps
+
+The connections pipeline runs as **five staggered cron passes**, each consuming the previous
+pass's output. Confirm the schedule leaves enough gap (defaults already do):
+
+| Pass | Default cron | Console script | Reads |
+|---|---|---|---|
+| ingest | `0 */6 * * *` | `connections-ingest` | auth roster + brain Profile API |
+| score | `0 2 * * *` | `connections-score` | ingested snapshots (kernel) |
+| eval | `0 3 * * *` | `connections-eval` | candidate scores (LLM) |
+| surface | `0 4 * * *` | `connections-surface` | eval results → brain check-ins (1:1) |
+| cluster | `0 5 * * *` | `connections-cluster` | interest graph + scores → group check-ins |
+
+- [ ] **Run the chain once manually against a small seed pool** before trusting the schedule:
+      `uv run connections-ingest && uv run connections-score && uv run connections-eval &&
+      uv run connections-surface && uv run connections-cluster`. Inspect the actual
+      `candidate_scores`, `eval_results`, and `group_candidates` rows (and the `reason` strings)
+      to sanity-check matching quality and tone before real users see anything.
+- [ ] **Confirm `ANTHROPIC_API_KEY` billing/rate limits** are sized for `eval_pass` (it makes one
+      call per directed candidate pair on the shortlist) — separate from the brain's usage.
+- [ ] **Smoke-test the companion's `PEOPLE_MATCH` / `PEOPLE_MATCH_GROUP` openers in a real chat**,
+      not just unit tests — the "warm friend, never an app/algorithm" tone is the whole point and
+      is hard to unit-test convincingly. Queue a test check-in (`POST /users/{id}/checkins`), open
+      a session, and read the actual opener + the yes/no callback.
+- [ ] **Scheduler dependency:** the five crons run via APScheduler inside the connections process,
+      but `apscheduler` is an **optional** dep (`main.py` degrades to no scheduler if absent). To
+      use the in-process crons, `uv sync --extra scheduler`; otherwise trigger the console scripts
+      from an external cron instead.
+
+### Monitoring (not built yet — recommended before scale)
+- [ ] Daily digest of the five passes: counts + error rate per pass (the passes log a summary
+      dict and never raise; per-user/per-pair failures are swallowed, so watch the logs).
+- [ ] Alert if `eval_pass` error rate exceeds a threshold — that usually signals an Anthropic API
+      issue (rate limit / outage), not a data problem.
