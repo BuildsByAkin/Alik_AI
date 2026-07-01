@@ -32,7 +32,15 @@ the BRAIN FIRST IN TEXT; voice is the final phase and just an I/O swap.
 - Living profile ✓ Step 1 — behavioral-dimension layer + soft-confirm + Profile API +
   cross-service delete (unit-tested; live gate pending).
 - Living profile ✓ Step 2 — job-matching microservice (above) consuming the Profile API.
-- Phase 6 — voice (half-cascade) (next)
+- Connections (people-matching) ✓ — the product's core thesis: `services/connections/` (own
+  Postgres on 5434, port 8003) runs a 5-pass pipeline (ingest→score→eval→surface→cluster) over
+  the living profile and surfaces 1:1 + group intros as warm companion openers. DRY-RUN VALIDATED
+  end-to-end via `scripts/connections_stress/` (8 synthetic MN users → real brain memory → real
+  chain → real openers); that run found + fixed 4 bugs (opener identity fabrication, greedy
+  interest-synonym matching, eval over-flagging, group render). Pass-run monitoring shipped:
+  `pass_runs` table + daily digest + eval-failure alerting (`connections-digest` / `GET /digest`).
+- Phase 6 — voice (half-cascade). The BRAIN is now proven in text end-to-end (companion + memory
+  + job- and people-matching), so voice is the remaining I/O swap and the genuine next phase.
 
 ## Open seams
 - last_seen on graph Facts: still using valid_from as proxy — NOT addressed (deferred).

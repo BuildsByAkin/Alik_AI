@@ -217,8 +217,14 @@ pass's output. Confirm the schedule leaves enough gap (defaults already do):
       use the in-process crons, `uv sync --extra scheduler`; otherwise trigger the console scripts
       from an external cron instead.
 
-### Monitoring (not built yet — recommended before scale)
-- [ ] Daily digest of the five passes: counts + error rate per pass (the passes log a summary
-      dict and never raise; per-user/per-pair failures are swallowed, so watch the logs).
-- [ ] Alert if `eval_pass` error rate exceeds a threshold — that usually signals an Anthropic API
-      issue (rate limit / outage), not a data problem.
+### Monitoring (BUILT — pass-run digest + alerting)
+Each pass now records its `PASS_SUMMARY` to the `pass_runs` table (best-effort; a persistence
+error never fails the pass). Read it three ways:
+- [ ] **Daily digest** of the five passes (counts + failure rate per pass over a window): the
+      `connections-digest` console script, a daily in-process scheduler job (`DIGEST_CRON`, default
+      06:30), or `GET /digest`.
+- [ ] **Alert** when the `eval` pass's LLM-failure rate is ≥ `EVAL_ERROR_RATE_THRESHOLD`
+      (default 0.2) — usually an Anthropic rate-limit/outage, not a data problem — or when a pass
+      hasn't run in the window (a cron that stopped firing). Alerts log at WARNING as
+      `CONNECTIONS ALERT: …`; wire those to your pager/log alerting.
+- [ ] Tunables: `DIGEST_WINDOW_HOURS` (24), `EVAL_ERROR_RATE_THRESHOLD` (0.2), `DIGEST_CRON`.
