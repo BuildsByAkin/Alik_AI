@@ -165,3 +165,12 @@ async def test_derive_skips_llm_when_disabled(monkeypatch, enabled):
     edges = await _derive_interests(profile, settings, llm)
     assert "creative:pottery" in _edges(edges)
     assert "outdoor_active:rock_climbing" not in _edges(edges)
+
+
+def test_prompt_forbids_inventing_unmentioned_interests_but_keeps_paraphrase():
+    from connections_service.interest_tagger import TAG_SYSTEM
+
+    # precision guard against over-inference (Ben -> photography)...
+    assert "NEVER ADD" in TAG_SYSTEM
+    # ...without abandoning the paraphrase win that beat keyword matching.
+    assert "Paraphrase is expected" in TAG_SYSTEM

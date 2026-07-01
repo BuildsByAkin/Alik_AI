@@ -154,16 +154,32 @@ This is the part most worth getting right on paper before any code.
   sink; the digest/monitoring we just built, extended to rendezvous passes.
 - **8.2 (separate, consent-gated):** real hand-off (contact exchange), if ever.
 
-## 9. Open decisions (need your call)
+## 9. Decisions (locked)
 
-1. **Separate service vs. a module inside connections?** Recommend separate (§3), but it's a real
-   fork.
-2. **Memory write-back: new `record_social_event` method, or lean entirely on existing
-   EmotionalSignal/Commitment seams?** Recommend a thin new method for durable social events + reuse
-   for feelings.
-3. **How vague is "where"?** MVP = rough area + time window only, never an address. Confirm that's
-   the privacy bar you want.
-4. **Does matching (jobs) also write back now**, or only people-matching for this phase? Recommend
-   including jobs for symmetry — it's a tiny addition once the seam exists.
-5. **Ordering vs. Phase 6 (voice).** This arguably delivers more product value than voice, and
-   voice will "just work" over it since it's all text/check-ins. Recommend Phase 8 before voice.
+1. **Separate service** — ✅ DECIDED. `services/rendezvous/`, own Postgres (5435), port 8004
+   (per §3). Keeps connections a pure scoring/surfacing engine.
+2. **Memory write-back mechanism** — ✅ DECIDED. Add a thin new `Memory.record_social_event`
+   for durable social events (introduced / accepted / meet set), and reuse the existing
+   `EmotionalSignal` seam for how a meet *felt* (like job follow-through).
+3. **`where` privacy bar** — ✅ DECIDED for MVP: keep it **vague** — the MVP collects a free-text
+   "rough where/when" and just **relays** it between the two sides (no parsing, no address). A
+   dedicated LLM step to parse/negotiate a concrete plan from the two free-text preferences is a
+   **fast-follow after the MVP loop works** (the `PROPOSED PLAN` state in §4 / phase 8.1), not now.
+4. **Jobs-matching writes back too** — ✅ DECIDED: yes. Once `record_social_event` exists,
+   matching writes "alik recommended {role}; they liked it" for symmetry, so the companion
+   remembers job nudges as well as people intros.
+5. **Ordering vs. Phase 6 (voice)** — recommendation stands: **Phase 8 before voice** (it makes
+   the product actually get people to meet; voice works over it for free). Open for final confirm.
+
+### Locked build order (8.0 MVP)
+1. Brain: `Memory.record_social_event` (+ erased by `delete`) and the new `CheckinType`s
+   (`RENDEZVOUS_PREF` / `RENDEZVOUS_CONFIRM` / `RENDEZVOUS_FOLLOWUP`) + companion delivery/classify.
+2. `services/rendezvous/` scaffold (Postgres 5435, mesh-guarded, own `.env`), the meet state
+   machine (collapsed MVP: COORDINATING → CONFIRMED → FOLLOWED_UP), wake on connections accept.
+3. Free-text pref relay (no LLM parsing yet) → confirm → follow-up writes an `EmotionalSignal`.
+4. Cross-user `delete(A)` fan-out: erase A's side, tombstone B's (§7). Memory write-backs for
+   introduced/accepted/met via `record_social_event`.
+5. Matching writes back the job symmetry event. Extend the digest/monitoring to rendezvous passes.
+
+Fast-follows (8.1): the LLM plan-negotiation step (decision 3), a staleness/cancel sink, richer
+lifecycle. Out of scope until asked (8.2): real contact hand-off (consent-gated).
