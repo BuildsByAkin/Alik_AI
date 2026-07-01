@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     auth_service_url: str = "http://localhost:8001"  # identity for the profile + erasure.
     matching_service_url: str = "http://localhost:8002"  # job matching (empty disables it).
     connections_service_url: str = "http://localhost:8003"  # people matching (empty disables it).
+    rendezvous_service_url: str = "http://localhost:8004"  # meeting coordination (empty disables).
 
     # Optional persona override; falls back to the packaged persona.txt.
     persona_path: str | None = None

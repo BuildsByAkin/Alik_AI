@@ -75,8 +75,27 @@ services:
       timeout: 3s
       retries: 15
 
+  # The rendezvous (meeting-coordination) microservice's OWN Postgres (all meet state).
+  # Host 5435 -> container 5432 (5432/5433/5434 are taken by brain/matching/connections).
+  rendezvous-postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: alik
+      POSTGRES_PASSWORD: alik
+      POSTGRES_DB: rendezvous
+    ports:
+      - "5435:5432"
+    volumes:
+      - rendezvousdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alik"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
 volumes:
   pgdata:
   falkordata:
   matchingdata:
   connectionsdata:
+  rendezvousdata:

@@ -18,8 +18,15 @@ from alik.llm import AnthropicLLM
 from alik.matching_client import MatchingClient
 from alik.memory.base import Memory
 from alik.memory.graph import GraphMemory
-from alik.models import CheckinType, PendingCheckin, TraitStatus
+from alik.models import (
+    CheckinType,
+    PendingCheckin,
+    SocialEvent,
+    SocialEventKind,
+    TraitStatus,
+)
 from alik.prompt import load_persona
+from alik.rendezvous_client import RendezvousClient
 from alik.scheduler import start_scheduler
 
 
@@ -58,6 +65,16 @@ class CheckinRequest(BaseModel):
     reason: str
 
 
+class SocialEventRequest(BaseModel):
+    """A matchmaking event a service records to the brain (Phase 8 write-back). The counterpart
+    is referenced only anonymously (summary) + by an opaque id, never a name."""
+
+    kind: str  # a SocialEventKind value
+    summary: str  # anonymized human sentence the companion can recall
+    source: str  # connections | rendezvous | matching
+    counterpart_ref: str | None = None
+
+
 def _profile_payload(user_id: str, identity: dict | None, facts, traits, dimensions) -> dict:
     """Serialize the assembled living profile for the Profile API (matching's input)."""
     return {
@@ -88,6 +105,7 @@ def create_app(
     auth_client: AuthClient | None = None,
     matching_client: MatchingClient | None = None,
     connections_client: ConnectionsClient | None = None,
+    rendezvous_client: RendezvousClient | None = None,
 ) -> FastAPI:
     """Build the app. Inject ``companion``/``memory``/``auth_client``/``matching_client``/
     ``connections_client`` for tests; otherwise they are constructed from ``Settings``."""
@@ -135,6 +153,11 @@ def create_app(
             if settings.connections_service_url
             else None
         )
+        app.state.rendezvous_client = (
+            RendezvousClient(base_url=settings.rendezvous_service_url, service_token=token)
+            if settings.rendezvous_service_url
+            else None
+        )
         app.state.companion = Companion(
             memory=mem,
             llm=llm,
@@ -157,6 +180,8 @@ def create_app(
                 await app.state.matching_client.aclose()
             if app.state.connections_client is not None:
                 await app.state.connections_client.aclose()
+            if app.state.rendezvous_client is not None:
+                await app.state.rendezvous_client.aclose()
             await mem.aclose()
 
     app = FastAPI(title="alik", lifespan=lifespan)
@@ -170,6 +195,8 @@ def create_app(
         app.state.matching_client = matching_client
     if connections_client is not None:
         app.state.connections_client = connections_client
+    if rendezvous_client is not None:
+        app.state.rendezvous_client = rendezvous_client
 
     @app.post("/chat")
     async def chat(req: ChatRequest, request: Request) -> StreamingResponse:
@@ -220,11 +247,12 @@ def create_app(
         companion delivers it (warmly, never as a 'match') at the next session."""
         _check_service_token(request, x_service_token)
         memory: Memory = request.app.state.memory
-        checkin_type = (
-            CheckinType.PEOPLE_MATCH_GROUP
-            if req.type == "people_match_group"
-            else CheckinType.PEOPLE_MATCH
-        )
+        try:
+            checkin_type = CheckinType(req.type)  # people_match* | rendezvous_* | ...
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"unknown check-in type {req.type!r}"
+            ) from exc
         checkin_id = await memory.queue_checkin(
             PendingCheckin(
                 user_id=user_id,
@@ -234,6 +262,32 @@ def create_app(
             )
         )
         return {"checkin_id": checkin_id}
+
+    @app.post("/users/{user_id}/social-events")
+    async def record_social_event(
+        user_id: str,
+        req: SocialEventRequest,
+        request: Request,
+        x_service_token: str | None = Header(default=None),
+    ) -> dict:
+        """Service-to-service: matching/connections/rendezvous record a matchmaking event so the
+        companion remembers its own matchmaking. Erased by DELETE /users/{id}."""
+        _check_service_token(request, x_service_token)
+        memory: Memory = request.app.state.memory
+        try:
+            kind = SocialEventKind(req.kind)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"unknown event kind {req.kind!r}") from exc
+        await memory.record_social_event(
+            SocialEvent(
+                user_id=user_id,
+                kind=kind,
+                summary=req.summary,
+                source=req.source,
+                counterpart_ref=req.counterpart_ref,
+            )
+        )
+        return {"recorded": True}
 
     @app.delete("/users/{user_id}")
     async def delete_user(user_id: str, request: Request) -> dict:
@@ -246,6 +300,9 @@ def create_app(
         connections: ConnectionsClient | None = getattr(
             request.app.state, "connections_client", None
         )
+        rendezvous: RendezvousClient | None = getattr(
+            request.app.state, "rendezvous_client", None
+        )
         await memory.delete(user_id)
         if auth is not None:
             await auth.delete_user(user_id)
@@ -253,6 +310,8 @@ def create_app(
             await matching.delete_user(user_id)
         if connections is not None:
             await connections.delete_user(user_id)
+        if rendezvous is not None:
+            await rendezvous.delete_user(user_id)
         return {"deleted": user_id}
 
     return app
