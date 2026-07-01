@@ -13,6 +13,7 @@ node when a cause keyword matches — never raw content.
 from __future__ import annotations
 
 import logging
+import re
 
 from connections_service.models import InterestEdge, InterestNode
 
@@ -257,32 +258,70 @@ def all_interest_nodes() -> list[InterestNode]:
     return nodes
 
 
-def map_content_to_node(content: str) -> str | None:
-    """First synonym hit anywhere in the taxonomy, or None (caller decides warn vs skip)."""
+# --- keyword matching -----------------------------------------------------------------------
+#
+# Keywords are STEMS matched at a word boundary (``\bhik`` catches "hiking"/"hikes"), NOT raw
+# substrings — plain ``in`` matched a stem inside an unrelated word ("camp" in "campaign",
+# "run" in "runs a campaign"), inventing false interests. Two more safeguards:
+#   * FALSE-FRIEND GUARDS: a negative lookahead blocks a stem's known collisions
+#     ("camp" but not "campaign"; "ski" but not "skill/skin/skip/skirt").
+#   * SPECIFICITY over POSITION: when several keywords hit, an unambiguous MULTIWORD phrase
+#     ("tabletop rpg", "board game") wins over a short verb-stem ("run"), so "Runs tabletop RPG
+#     campaigns" maps to D&D, not running; among equals the earliest mention wins.
+
+_FALSE_FRIEND_GUARD: dict[str, str] = {
+    "camp": r"(?!aign)",  # camping/campsite — never "campaign" (e.g. a D&D campaign)
+    "ski": r"(?!ll|n|p|rt)",  # skiing/ski — never skill/skin/skip/skirt
+}
+
+# Multiword keywords are normally treated as UNAMBIGUOUS and win over a short verb-stem. A few
+# are weak/incidental context ("at the gym" is not a specific interest) — demote them so they
+# don't override a clear hobby stem like "bouldering".
+_WEAK_MULTIWORD: frozenset[str] = frozenset({"the gym"})
+
+
+def _compile(keyword: str) -> re.Pattern[str]:
+    return re.compile(r"\b" + re.escape(keyword) + _FALSE_FRIEND_GUARD.get(keyword, ""))
+
+
+_COMPILED_SYNONYMS: list[tuple[str, str, re.Pattern[str]]] = [
+    (kw, node_id, _compile(kw)) for kw, node_id in SYNONYMS.items()
+]
+
+
+def _best_match(content: str, items: list[tuple[str, str, re.Pattern[str]]]) -> str | None:
+    """The best synonym hit among ``items``: prefer a multiword (unambiguous) keyword, then the
+    earliest mention, then the longest keyword. None if nothing matches."""
     c = content.lower()
-    for keyword, node_id in SYNONYMS.items():
-        if keyword in c:
-            return node_id
-    return None
+    best_key: tuple[int, int, int] | None = None
+    best_node: str | None = None
+    for keyword, node_id, pattern in items:
+        m = pattern.search(c)
+        if m is None:
+            continue
+        strong = " " in keyword and keyword not in _WEAK_MULTIWORD
+        key = (0 if strong else 1, m.start(), -len(keyword))
+        if best_key is None or key < best_key:
+            best_key, best_node = key, node_id
+    return best_node
+
+
+def map_content_to_node(content: str) -> str | None:
+    """Best synonym hit anywhere in the taxonomy, or None (caller decides warn vs skip)."""
+    return _best_match(content, _COMPILED_SYNONYMS)
 
 
 def map_in_category(content: str, broad: str) -> str:
     """Map within a known category: a specific synonym if one hits, else the ``_general`` node.
     Used where the fact key already implies the category (music_taste, book_genre, sports_team)."""
-    c = content.lower()
-    for keyword, node_id in SYNONYMS.items():
-        if node_id.startswith(f"{broad}:") and keyword in c:
-            return node_id
-    return f"{broad}:{GENERAL}"
+    scoped = [t for t in _COMPILED_SYNONYMS if t[1].startswith(f"{broad}:")]
+    return _best_match(content, scoped) or f"{broad}:{GENERAL}"
 
 
 def map_cause(content: str) -> str | None:
     """A social_causes node only if a cause keyword matches — never a generic fallback."""
-    c = content.lower()
-    for keyword, node_id in SYNONYMS.items():
-        if node_id.startswith("social_causes:") and keyword in c:
-            return node_id
-    return None
+    scoped = [t for t in _COMPILED_SYNONYMS if t[1].startswith("social_causes:")]
+    return _best_match(content, scoped)
 
 
 def _intensity_factor(dims: dict[str, dict]) -> float:

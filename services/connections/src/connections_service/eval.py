@@ -193,10 +193,19 @@ EVAL_SYSTEM = (
     '  "reason": "one or two sentences, specific to what they share, written as if alik is '
     'explaining to a friend why these two people should meet — warm, concrete, no jargon",\n'
     '  "flag_for_review": true | false,\n'
-    '  "flag_reason": "only if flag_for_review is true — what made you uncertain"\n'
+    '  "flag_reason": "only if flag_for_review is true — the specific concern a human should '
+    'check"\n'
     "}\n\n"
-    "Be honest. If the shared signals are thin or generic, say so with low confidence and flag "
-    "it. Only say would_click: true if you can point to something specific they share."
+    "Be honest. If the shared signals are thin or generic, say so with LOW confidence and "
+    "would_click: false — that is a clear 'no', not something to flag. Only say would_click: "
+    "true if you can point to something specific they share.\n\n"
+    "flag_for_review is NOT for ordinary incomplete knowledge — you will never know everything "
+    "about two people, and that alone is never a reason to flag. Reserve it for a CONCRETE red "
+    "flag a human should look at before this is ever shown: the signals actively CONTRADICT each "
+    "other (e.g. one clearly wants calm and the other clearly wants intense/high-energy on the "
+    "very thing they'd share), a plausible mismatch or awkwardness despite surface overlap, or a "
+    "genuine coin-flip where you could just as easily have answered the opposite. A confident yes "
+    "or a clear no needs NO flag. Most pairs should not be flagged."
 )
 
 

@@ -475,8 +475,10 @@ class Companion:
                 "mentioning a few people you've come across who are into the same thing they "
                 "love and who you think they'd genuinely enjoy spending time with. This is NOT "
                 "an app and NOT a 'group we formed': never use the words 'match' or 'group', and "
-                "never mention an app, a system, an algorithm, or that anything was computed. In "
-                "one or two sentences bring it up grounded in this private note: "
+                "never mention an app, a system, an algorithm, or that anything was computed. You "
+                "do NOT know these people's names, genders, ages, or appearance — never invent or "
+                "state any of those; refer to them only as 'a few people' or 'some folks' and use "
+                "they/them. In one or two sentences bring it up grounded in this private note: "
                 f'"{hint}". End by gently seeing whether they\'d be open to all getting together '
                 "— light and no-pressure."
             )
@@ -485,7 +487,10 @@ class Companion:
                 "Open this conversation yourself — warm and natural, like a good friend "
                 "casually mentioning someone you think they'd genuinely enjoy meeting. This is "
                 "NOT a dating app and NOT a 'match': never use the word 'match', and never "
-                "mention an app, a system, an algorithm, or that anything was computed. In one "
+                "mention an app, a system, an algorithm, or that anything was computed. You do "
+                "NOT know this person's name, gender, age, or appearance — never invent or state "
+                "any of those (do not give them a name); refer to them only as 'someone' or 'a "
+                "person' and use they/them. In one "
                 "or two sentences, bring the other person up grounded in what they share, using "
                 f'this private note as the heart of it: "{hint}". End by gently seeing whether '
                 "they'd be open to meeting them — light and no-pressure, not a formal question."

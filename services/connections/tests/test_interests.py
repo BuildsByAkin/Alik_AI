@@ -102,3 +102,60 @@ def test_taxonomy_has_general_node_per_category():
     ids = {n.id for n in all_interest_nodes()}
     assert "outdoor_active:_general" in ids
     assert "music_listening:_general" in ids
+
+
+# --- word-boundary matching + false-friend guards (regression: greedy substring bug) ----------
+# The old `keyword in content` matched a stem inside an unrelated word, inventing false
+# interests. These pin the fixes down against the real synthetic-run fact strings that exposed
+# them ("Runs tabletop RPG campaigns" -> running; "D&D campaign" -> camping).
+
+from connections_service.interests import (  # noqa: E402
+    map_cause,
+    map_content_to_node,
+    map_in_category,
+)
+
+
+def test_verb_run_in_gaming_context_maps_to_dnd_not_running():
+    assert map_content_to_node("Runs tabletop RPG campaigns (dungeon master)") == "gaming:dnd"
+
+
+def test_campaign_does_not_map_to_camping():
+    # "camp" must not match inside "campaign"
+    assert map_content_to_node("marketing campaign strategy") is None
+    assert map_content_to_node("Plays Dungeons & Dragons in an ongoing campaign") == "gaming:dnd"
+
+
+def test_camping_still_maps():
+    assert (
+        map_content_to_node("backcountry camping and overnight trips") == "outdoor_active:camping"
+    )
+
+
+def test_ski_guard_excludes_skill_skin_skip():
+    assert map_content_to_node("great people skills") is None
+    assert map_content_to_node("skiing at Lutsen") == "outdoor_active:skiing"
+
+
+def test_multiword_keyword_beats_short_stem_regardless_of_position():
+    # "run" appears first but "board game" is the unambiguous signal.
+    assert map_content_to_node("runs a weekly board game night") == "gaming:board_games"
+
+
+def test_first_mention_breaks_ties_among_equals():
+    # two single-word outdoor stems; the earlier one (hiking) wins.
+    assert map_content_to_node("Solo hiking and backcountry camping") == "outdoor_active:hiking"
+
+
+def test_stem_prefix_still_matches_inflections():
+    assert map_content_to_node("she hikes every weekend") == "outdoor_active:hiking"
+    assert map_content_to_node("bouldering projects at the gym") == "outdoor_active:rock_climbing"
+
+
+def test_map_in_category_and_cause_use_same_guards():
+    assert map_in_category("folk music and traditional songs", "music_listening") == (
+        "music_listening:folk"
+    )
+    # a bare campaign in a values fact must not fabricate a cause
+    assert map_cause("runs a local political campaign") is None
+    assert map_cause("volunteers at an animal rescue") == "social_causes:animal_welfare"

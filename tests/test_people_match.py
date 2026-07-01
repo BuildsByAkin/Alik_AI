@@ -90,6 +90,9 @@ async def test_people_match_opener_is_warm_not_clinical(user_id):
     assert "good friend casually mentioning someone" in llm.last_system
     assert REASON in llm.last_system
     assert "never use the word 'match'" in llm.last_system
+    # Must not fabricate the candidate's identity — the payload carries no name/gender.
+    assert "do not give them a name" in llm.last_system
+    assert "they/them" in llm.last_system
     assert companion._match_checkin["S"] == "cand-1"
 
 
@@ -148,6 +151,9 @@ async def test_group_opener_is_warm_not_clinical(user_id):
     assert "mentioning a few people" in llm.last_system
     assert GROUP_REASON in llm.last_system
     assert "never use the words 'match' or 'group'" in llm.last_system
+    # Must not fabricate the group members' identities.
+    assert "never invent or state any of those" in llm.last_system
+    assert "they/them" in llm.last_system
     assert companion._group_checkin["S"] == "grp-1"
 
 
