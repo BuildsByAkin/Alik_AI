@@ -50,6 +50,13 @@ from alik.prompt import (
 
 logger = logging.getLogger("alik.companion")
 
+# Which rendezvous coordination stage a delivered check-in is capturing a reply for.
+_RENDEZVOUS_STAGE = {
+    CheckinType.RENDEZVOUS_PREF: "pref",
+    CheckinType.RENDEZVOUS_CONFIRM: "confirm",
+    CheckinType.RENDEZVOUS_FOLLOWUP: "followup",
+}
+
 
 class Companion:
     def __init__(
@@ -71,6 +78,7 @@ class Companion:
         profile_confirm_confidence_bump: float = 0.1,
         matching_client=None,
         connections_client=None,
+        rendezvous_client=None,
     ) -> None:
         self._memory = memory
         self._llm = llm
@@ -112,6 +120,10 @@ class Companion:
         self._connections = connections_client
         self._match_checkin: dict[str, str] = {}  # session_id -> candidate_id awaiting a reply
         self._group_checkin: dict[str, str] = {}  # session_id -> group_id awaiting a reply
+        # Phase 8 rendezvous delivery: coordinate a meet; capture the reply and post it back.
+        # None → never delivered (graceful). session_id -> (stage, meet_id) awaiting a reply.
+        self._rendezvous = rendezvous_client
+        self._rendezvous_checkin: dict[str, tuple[str, str]] = {}
 
     async def respond(self, user_id: str, session_id: str, user_message: str) -> AsyncIterator[str]:
         """Stream a reply, appending both turns to the live buffer."""
@@ -158,6 +170,13 @@ class Companion:
         if session_id in self._group_checkin:
             group_directive = await self._handle_group_response(user_id, session_id, user_message)
 
+        # If a rendezvous coordination question is open, this message is the reply to it.
+        rendezvous_directive: str | None = None
+        if session_id in self._rendezvous_checkin:
+            rendezvous_directive = await self._handle_rendezvous_response(
+                user_id, session_id, user_message
+            )
+
         ctx = await self._memory.retrieve(user_id, session_id, episode_limit=self._episode_limit)
         system = build_system_prompt(
             self._persona,
@@ -174,6 +193,8 @@ class Companion:
             system += f"\n\n{match_directive}"
         if group_directive:
             system += f"\n\n{group_directive}"
+        if rendezvous_directive:
+            system += f"\n\n{rendezvous_directive}"
 
         # One gentle check per session: prefer a reflect-back question, else a profile
         # soft-confirm. Both share the cadence cooldown so it never feels like an interview.
@@ -460,6 +481,12 @@ class Companion:
                 group_id = checkin.payload.get("group_id")
                 if group_id:
                     self._group_checkin[session_id] = group_id
+        # Arm the rendezvous reply capture so the next turn's reply advances the meet.
+        if self._rendezvous is not None and (checkin.payload or {}):
+            stage = _RENDEZVOUS_STAGE.get(checkin.checkin_type)
+            meet_id = checkin.payload.get("meet_id")
+            if stage and meet_id:
+                self._rendezvous_checkin[session_id] = (stage, meet_id)
         return opener
 
     # --- Job recommendation delivery + lifecycle (via the matching microservice) ----
@@ -575,6 +602,26 @@ class Companion:
             return False
         positives = ("yes", "yeah", "yep", "sure", "please", "ok", "okay", "send", "link", "go")
         return any(p in m for p in positives)
+
+    @classmethod
+    def _reads_positive(cls, message: str) -> bool:
+        """A light positive/negative read for a rendezvous follow-up ('how did it feel?'), where
+        yes/no doesn't fit. Word-list proxy for the MVP — the design's EmotionalSignal step is
+        where a real classifier can land later."""
+        m = message.lower()
+        negatives = (
+            "awkward", "meh", "bad", "terrible", "didn't click", "did not click", "not great",
+            "weird", "uncomfortable", "boring", "disappoint", "rough", "flat",
+        )
+        if any(n in m for n in negatives):
+            return False
+        positives = (
+            "great", "good", "fun", "went well", "clicked", "lovely", "nice", "glad", "enjoyed",
+            "amazing", "wonderful", "awesome", "connected", "hit it off", "laughed",
+        )
+        if any(p in m for p in positives):
+            return True
+        return cls._is_affirmative(message)
 
     async def _handle_job_response(
         self, user_id: str, session_id: str, user_message: str
@@ -693,6 +740,40 @@ class Companion:
                 "— light, no logistics yet."
             )
         return None
+
+    async def _handle_rendezvous_response(
+        self, user_id: str, session_id: str, user_message: str
+    ) -> str | None:
+        """The reply to a rendezvous coordination question — posted back to the rendezvous
+        service. Single-shot — always clears the per-session state.
+
+        - pref: the message IS the rough where/when → relay it verbatim.
+        - confirm: a yes/no to the proposed plan.
+        - followup: how it felt (affirmative ≈ positive; a light proxy, no LLM in the MVP).
+        """
+        state = self._rendezvous_checkin.pop(session_id, None)
+        if state is None or self._rendezvous is None:
+            return None
+        stage, meet_id = state
+        if stage == "pref":
+            await self._rendezvous.post_pref(meet_id, user_id, user_message.strip())
+            return (
+                "They shared a rough sense of where/when works. Warmly acknowledge it and let "
+                "them know you'll see what works for the other person too — light, no pressure."
+            )
+        if stage == "confirm":
+            accepted = self._is_affirmative(user_message)
+            await self._rendezvous.post_confirm(meet_id, user_id, accepted)
+            if accepted:
+                return "They're good with the plan. Warmly let them know you'll lock it in."
+            return "They'd rather not, or not now. Warmly reassure them — no pressure at all."
+        # followup
+        felt_positive = self._reads_positive(user_message)
+        await self._rendezvous.post_followup(meet_id, user_id, felt_positive)
+        return (
+            "Warmly thank them for sharing how it went, and respond to how they FEEL about it "
+            "— not whether they 'should' meet again."
+        )
 
     def _clear_checkin(self, session_id: str) -> None:
         self._checkin_commitment.pop(session_id, None)

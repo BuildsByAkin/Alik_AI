@@ -28,6 +28,7 @@ from connections_service.interests import all_interest_nodes
 from connections_service.llm import AnthropicLLM, LLMClient
 from connections_service.models import HealthResponse
 from connections_service.monitoring import alerts, build_digest, run_digest
+from connections_service.rendezvous_client import RendezvousClient
 from connections_service.routes import router
 from connections_service.scoring import scoring_pass
 from connections_service.store import PgStore, Store
@@ -83,6 +84,7 @@ def create_app(
     brain_client: BrainClient | None = None,
     auth_client: AuthClient | None = None,
     llm: LLMClient | None = None,
+    rendezvous_client: RendezvousClient | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -95,6 +97,11 @@ def create_app(
         await app.state.store.ensure_interest_nodes(all_interest_nodes())
         app.state.brain_client = BrainClient(base_url=settings.brain_url, service_token=token)
         app.state.auth_client = AuthClient(base_url=settings.auth_url, service_token=token)
+        app.state.rendezvous_client = (
+            RendezvousClient(base_url=settings.rendezvous_url, service_token=token)
+            if settings.rendezvous_url
+            else None
+        )
         app.state.llm = AnthropicLLM(
             api_key=settings.anthropic_api_key.get_secret_value(),
             model=settings.eval_model,
@@ -108,6 +115,8 @@ def create_app(
                 app.state.scheduler.shutdown(wait=False)
             await app.state.auth_client.aclose()
             await app.state.brain_client.aclose()
+            if app.state.rendezvous_client is not None:
+                await app.state.rendezvous_client.aclose()
             await app.state.store.aclose()
 
     app = FastAPI(title="alik connections service", version="0.1.0", lifespan=lifespan)
@@ -118,6 +127,8 @@ def create_app(
         app.state.brain_client = brain_client
     if auth_client is not None:
         app.state.auth_client = auth_client
+    if rendezvous_client is not None:
+        app.state.rendezvous_client = rendezvous_client
     if llm is not None:
         app.state.llm = llm
 

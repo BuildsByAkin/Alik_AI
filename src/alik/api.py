@@ -166,6 +166,7 @@ def create_app(
             extractor=Extractor(llm=extraction_llm, memory=mem),
             matching_client=app.state.matching_client,
             connections_client=app.state.connections_client,
+            rendezvous_client=app.state.rendezvous_client,
         )
         # Nightly sleep pass — best-effort (skips cleanly if APScheduler absent).
         app.state.scheduler = start_scheduler(mem, extraction_llm, settings)

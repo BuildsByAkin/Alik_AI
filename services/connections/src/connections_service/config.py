@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     brain_url: str = "http://localhost:8000"
     # The auth service (source of the ingest roster: which user_ids exist, by state).
     auth_url: str = "http://localhost:8001"
+    # The rendezvous service — a meet is created there when both sides accept (empty disables).
+    rendezvous_url: str = "http://localhost:8004"
     # Shared service-to-service secret (== brain ALIK_SERVICE_TOKEN == auth/matching SERVICE_TOKEN).
     service_token: SecretStr = SecretStr("")
     port: int = 8003
