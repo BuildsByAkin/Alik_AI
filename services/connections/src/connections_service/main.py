@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI
 
@@ -26,6 +27,7 @@ from connections_service.ingest import run_ingest
 from connections_service.interests import all_interest_nodes
 from connections_service.llm import AnthropicLLM, LLMClient
 from connections_service.models import HealthResponse
+from connections_service.monitoring import alerts, build_digest, run_digest
 from connections_service.routes import router
 from connections_service.scoring import scoring_pass
 from connections_service.store import PgStore, Store
@@ -58,12 +60,16 @@ def _start_scheduler(app: FastAPI):
     async def _cluster_job() -> None:
         await clustering_pass(app.state.store, app.state.brain_client, settings)
 
+    async def _digest_job() -> None:
+        await run_digest(app.state.store, settings)
+
     scheduler = AsyncIOScheduler()
     scheduler.add_job(_ingest_job, CronTrigger.from_crontab(settings.ingest_cron), id="ingest")
     scheduler.add_job(_score_job, CronTrigger.from_crontab(settings.score_cron), id="score")
     scheduler.add_job(_eval_job, CronTrigger.from_crontab(settings.eval_cron), id="eval")
     scheduler.add_job(_surface_job, CronTrigger.from_crontab(settings.surface_cron), id="surface")
     scheduler.add_job(_cluster_job, CronTrigger.from_crontab(settings.cluster_cron), id="cluster")
+    scheduler.add_job(_digest_job, CronTrigger.from_crontab(settings.digest_cron), id="digest")
     scheduler.start()
     return scheduler
 
@@ -115,6 +121,15 @@ def create_app(
     @app.get("/health", response_model=HealthResponse, tags=["health"])
     async def health() -> HealthResponse:
         return HealthResponse(status="ok")
+
+    @app.get("/digest", tags=["health"])
+    async def digest() -> dict:
+        """On-demand pass-run digest (counts + failure rate per pass, over the window)."""
+        since = datetime.now(UTC) - timedelta(hours=settings.digest_window_hours)
+        runs = await app.state.store.get_recent_pass_runs(since)
+        d = build_digest(runs, since_hours=settings.digest_window_hours)
+        d["alerts"] = alerts(d, eval_threshold=settings.eval_error_rate_threshold)
+        return d
 
     app.include_router(router)
     return app

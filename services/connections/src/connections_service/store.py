@@ -28,6 +28,7 @@ from connections_service.models import (
     KernelExplanation,
     MatchStateEntry,
     MatchStatus,
+    PassRun,
     SharedInterests,
     SurfaceableMatch,
     UserPoolEntry,
@@ -196,6 +197,15 @@ class Store(ABC):
     async def delete_user(self, user_id: str) -> None:
         """Erase ALL of this service's data for the user (cross-service deletion seam)."""
 
+    # --- Monitoring: pass-run history for the digest ------------------------------
+    @abstractmethod
+    async def record_pass_run(self, run: PassRun) -> None:
+        """Persist one finished pass's summary (best-effort — callers never let it raise)."""
+
+    @abstractmethod
+    async def get_recent_pass_runs(self, since: datetime) -> list[PassRun]:
+        """All recorded pass runs at/after ``since`` (newest first)."""
+
 
 class InMemoryStore(Store):
     """Infra-free double mirroring PgStore semantics. Self-seeds the taxonomy on construction."""
@@ -209,6 +219,7 @@ class InMemoryStore(Store):
         self._evals: dict[tuple[str, str], EvalResult] = {}
         self._match: dict[tuple[str, str], MatchStateEntry] = {}
         self._groups: dict[str, GroupCandidate] = {}
+        self._pass_runs: list[PassRun] = []
         for node in interests.all_interest_nodes():
             self._nodes[node.id] = node
 
@@ -392,6 +403,14 @@ class InMemoryStore(Store):
         self._evals = {(a, b): e for (a, b), e in self._evals.items() if user_id not in (a, b)}
         self._match = {(u, c): m for (u, c), m in self._match.items() if user_id not in (u, c)}
         self._groups = {gid: g for gid, g in self._groups.items() if user_id not in g.member_ids}
+
+    async def record_pass_run(self, run: PassRun) -> None:
+        stamped = run if run.ran_at else replace(run, ran_at=datetime.now(UTC))
+        self._pass_runs.append(stamped)
+
+    async def get_recent_pass_runs(self, since: datetime) -> list[PassRun]:
+        rows = [r for r in self._pass_runs if r.ran_at is not None and r.ran_at >= since]
+        return sorted(rows, key=lambda r: r.ran_at, reverse=True)
 
 
 class PgStore(Store):
@@ -872,6 +891,38 @@ class PgStore(Store):
                 "DELETE FROM group_candidates WHERE member_ids @> ARRAY[$1]", user_id
             )
             await conn.execute("DELETE FROM users_pool WHERE user_id = $1", user_id)
+
+    async def record_pass_run(self, run: PassRun) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO pass_runs (pass_name, fields, failures, ran_at) "
+                "VALUES ($1, $2::jsonb, $3, COALESCE($4, now()))",
+                run.pass_name,
+                json.dumps(run.fields),
+                run.failures,
+                run.ran_at,
+            )
+
+    async def get_recent_pass_runs(self, since: datetime) -> list[PassRun]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT pass_name, fields, failures, ran_at FROM pass_runs "
+                "WHERE ran_at >= $1 ORDER BY ran_at DESC",
+                since,
+            )
+        out: list[PassRun] = []
+        for r in rows:
+            raw = r["fields"]
+            fields = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            out.append(
+                PassRun(
+                    pass_name=r["pass_name"],
+                    fields=fields,
+                    failures=r["failures"],
+                    ran_at=r["ran_at"],
+                )
+            )
+        return out
 
 
 # Keep a UTC helper importable for callers building UserPoolEntry timestamps.

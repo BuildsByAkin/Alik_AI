@@ -109,3 +109,16 @@ CREATE TABLE IF NOT EXISTS group_candidates (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_gc_members ON group_candidates (interest_node_id, member_ids);
 CREATE INDEX IF NOT EXISTS idx_gc_status ON group_candidates (status);
 CREATE INDEX IF NOT EXISTS idx_gc_members_gin ON group_candidates USING gin (member_ids);
+
+-- Monitoring: one row per finished pass (ingest/score/eval/surface/cluster). The pass keeps its
+-- one PASS_SUMMARY log line AND records the same flat fields here so a daily digest + alerting
+-- can read structured history instead of scraping logs. Best-effort — a persistence failure
+-- never fails the pass (observability must not affect the matching pipeline).
+CREATE TABLE IF NOT EXISTS pass_runs (
+    id        bigserial   PRIMARY KEY,
+    pass_name text        NOT NULL,       -- ingest | score | eval | surface | cluster
+    fields    jsonb       NOT NULL,       -- the flat PASS_SUMMARY key=value fields
+    failures  int         NOT NULL DEFAULT 0,  -- hard failures this run (hoisted for querying)
+    ran_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_pass_runs_recent ON pass_runs (pass_name, ran_at DESC);

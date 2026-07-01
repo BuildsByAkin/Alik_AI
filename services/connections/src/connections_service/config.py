@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     # Age-handling knob — default OFF. 25+ is gated at signup; the kernel must not read age.
     age_filter_mode: AgeFilterMode = AgeFilterMode.OFF
 
+    # Monitoring (pass-run digest + alerting). The digest aggregates pass_runs over a window;
+    # the alert fires when the eval pass's LLM-failure rate is at/above the threshold (usually an
+    # Anthropic outage, not a data problem). digest_cron is for the optional in-process scheduler.
+    digest_window_hours: int = 24
+    eval_error_rate_threshold: float = 0.2
+    digest_cron: str = "30 6 * * *"  # once a day, after the overnight cron cycle
+
     @property
     def launch_states_set(self) -> set[str]:
         return {s.strip().upper() for s in self.launch_states.split(",") if s.strip()}

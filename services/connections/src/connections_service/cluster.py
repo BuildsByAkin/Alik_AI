@@ -14,7 +14,7 @@ import uuid
 from connections_service.config import Settings
 from connections_service.eval import _interest_label
 from connections_service.models import GroupCandidate, GroupCheckin, GroupStatus
-from connections_service.passlog import format_pass_summary
+from connections_service.passlog import emit_pass_summary
 from connections_service.store import Store
 
 logger = logging.getLogger("connections.cluster")
@@ -97,14 +97,13 @@ async def clustering_pass(store: Store, brain_client, settings: Settings) -> dic
         counts["surfaced"], surface_failures = await _surface_groups(store, brain_client, settings)
         failures += surface_failures
     finally:
-        logger.info(
-            format_pass_summary(
-                "cluster",
-                groups_proposed=counts["proposed"],
-                groups_surfaced=counts["surfaced"],
-                failures=failures,
-                duration_s=round(time.perf_counter() - start, 1),
-            )
+        await emit_pass_summary(
+            store,
+            "cluster",
+            groups_proposed=counts["proposed"],
+            groups_surfaced=counts["surfaced"],
+            failures=failures,
+            duration_s=round(time.perf_counter() - start, 1),
         )
     return counts
 

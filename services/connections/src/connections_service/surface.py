@@ -13,7 +13,7 @@ import time
 from connections_service.config import Settings
 from connections_service.eval import _interest_label
 from connections_service.models import MatchCheckin, MatchStateEntry, MatchStatus, SurfaceableMatch
-from connections_service.passlog import format_pass_summary
+from connections_service.passlog import emit_pass_summary
 from connections_service.store import Store, now_utc
 
 logger = logging.getLogger("connections.surface")
@@ -57,13 +57,12 @@ async def surface_pass(store: Store, brain_client, settings: Settings) -> dict[s
                         )
                         counts["skipped"] += 1
     finally:
-        logger.info(
-            format_pass_summary(
-                "surface",
-                checkins_queued=counts["surfaced"],
-                brain_failures=brain_failures,
-                duration_s=round(time.perf_counter() - start, 1),
-            )
+        await emit_pass_summary(
+            store,
+            "surface",
+            checkins_queued=counts["surfaced"],
+            brain_failures=brain_failures,
+            duration_s=round(time.perf_counter() - start, 1),
         )
     return counts
 

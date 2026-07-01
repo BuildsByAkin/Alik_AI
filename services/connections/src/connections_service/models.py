@@ -265,3 +265,14 @@ class GroupResponse(BaseModel):
     user_id: str
     group_id: str
     accepted: bool
+
+
+@dataclass
+class PassRun:
+    """One finished cron pass, recorded for the monitoring digest. ``fields`` are the flat
+    PASS_SUMMARY key=value pairs; ``failures`` is hoisted out for querying/alerting."""
+
+    pass_name: str
+    fields: dict
+    failures: int = 0
+    ran_at: datetime | None = None

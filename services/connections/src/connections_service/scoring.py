@@ -10,7 +10,7 @@ import time
 from connections_service.config import Settings
 from connections_service.kernel import MatchInput, kernel
 from connections_service.models import CandidateScore
-from connections_service.passlog import format_pass_summary
+from connections_service.passlog import emit_pass_summary
 from connections_service.store import Store
 
 logger = logging.getLogger("connections.scoring")
@@ -66,14 +66,13 @@ async def scoring_pass(store: Store, settings: Settings) -> dict[str, int]:
                     failures += 1
                     logger.exception("connections scoring failed for user %s", entry.user_id)
     finally:
-        logger.info(
-            format_pass_summary(
-                "score",
-                pairs_scored=counts["scored"],
-                users_processed=counts["users"] + failures,
-                failures=failures,
-                duration_s=round(time.perf_counter() - start, 1),
-            )
+        await emit_pass_summary(
+            store,
+            "score",
+            pairs_scored=counts["scored"],
+            users_processed=counts["users"] + failures,
+            failures=failures,
+            duration_s=round(time.perf_counter() - start, 1),
         )
     return counts
 

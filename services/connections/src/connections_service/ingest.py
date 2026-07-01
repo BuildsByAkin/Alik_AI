@@ -18,7 +18,7 @@ import time
 from connections_service.config import Settings
 from connections_service.interests import all_interest_nodes, extract_interests
 from connections_service.models import DimensionSnapshot, UserPoolEntry
-from connections_service.passlog import format_pass_summary
+from connections_service.passlog import emit_pass_summary
 from connections_service.store import Store, now_utc
 
 logger = logging.getLogger("connections.ingest")
@@ -41,14 +41,13 @@ async def run_ingest(store: Store, brain_client, auth_client, settings: Settings
     finally:
         # pool_ready: count upserted as pool_ready THIS run (renamed from the spec's
         # `pool_ready_new` — we don't diff prior state, so it's a per-run count, not a delta).
-        logger.info(
-            format_pass_summary(
-                "ingest",
-                users_processed=sum(counts.values()) + failures,
-                failures=failures,
-                pool_ready=counts["ingested"],
-                duration_s=round(time.perf_counter() - start, 1),
-            )
+        await emit_pass_summary(
+            store,
+            "ingest",
+            users_processed=sum(counts.values()) + failures,
+            failures=failures,
+            pool_ready=counts["ingested"],
+            duration_s=round(time.perf_counter() - start, 1),
         )
     return counts
 

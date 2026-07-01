@@ -22,6 +22,7 @@ connections-score = "connections_service.scoring:main"
 connections-eval = "connections_service.eval:main"
 connections-surface = "connections_service.surface:main"
 connections-cluster = "connections_service.cluster:main"
+connections-digest = "connections_service.monitoring:main"
 
 [dependency-groups]
 dev = [

@@ -22,7 +22,7 @@ from connections_service.models import (
     KernelExplanation,
     UserPoolEntry,
 )
-from connections_service.passlog import format_pass_summary
+from connections_service.passlog import emit_pass_summary
 
 logger = logging.getLogger("connections.eval")
 
@@ -312,14 +312,13 @@ async def eval_pass(store, llm, settings: Settings) -> dict[str, int]:
                         )
                         counts["skipped"] += 1
     finally:
-        logger.info(
-            format_pass_summary(
-                "eval",
-                pairs_evaluated=counts["evaluated"],
-                llm_failures=failures,
-                flagged_for_review=flagged,
-                duration_s=round(time.perf_counter() - start, 1),
-            )
+        await emit_pass_summary(
+            store,
+            "eval",
+            pairs_evaluated=counts["evaluated"],
+            llm_failures=failures,
+            flagged_for_review=flagged,
+            duration_s=round(time.perf_counter() - start, 1),
         )
     return counts
 
