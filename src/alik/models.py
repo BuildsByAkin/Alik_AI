@@ -65,6 +65,10 @@ class CheckinType(StrEnum):
     PEOPLE_MATCH_GROUP = (
         "people_match_group"  # ...or a small group around a shared activity (Part 6)
     )
+    # Phase 8 (rendezvous): coordinate an accepted introduction into a real meeting.
+    RENDEZVOUS_PREF = "rendezvous_pref"  # ask, warmly, roughly where/when they'd like to meet
+    RENDEZVOUS_CONFIRM = "rendezvous_confirm"  # relay the other side's suggestion / confirm a plan
+    RENDEZVOUS_FOLLOWUP = "rendezvous_followup"  # after the meet, ask how it FELT (not whether)
 
 
 class JobOutcome(StrEnum):
@@ -213,6 +217,39 @@ class ProfileDimension:
     surfaced_in_session: str | None = None  # last session we soft-confirmed it in
     source_session_id: str | None = None  # session a confirm/correct was stated in, if any
     last_observed_at: datetime | None = None  # last nightly pass that (re)saw it
+    id: str = field(default_factory=lambda: uuid4().hex)
+
+
+class SocialEventKind(StrEnum):
+    """What kind of matchmaking event a service recorded to the brain (Phase 8 write-back).
+
+    So the companion stays coherent about its own matchmaking — it can later reference that it
+    introduced someone / a meet is set / how it went, and jobs for symmetry. Every event is
+    stored PER USER and describes the counterpart ONLY anonymously ("someone who loves pottery"),
+    never a name — the same privacy bar as the people-match opener.
+    """
+
+    PEOPLE_INTRODUCED = "people_introduced"  # surfaced an intro to the user
+    PEOPLE_ACCEPTED = "people_accepted"  # user was open to meeting them
+    MEET_SET = "meet_set"  # a rendezvous is arranged (rough where/when)
+    MET = "met"  # the meet happened (follow-up recorded; the feeling is a separate signal)
+    JOB_RECOMMENDED = "job_recommended"  # matching nudged a role (symmetry with people events)
+    JOB_LIKED = "job_liked"  # user liked/loved a recommended role
+
+
+@dataclass(frozen=True, slots=True)
+class SocialEvent:
+    """A durable, per-user record of alik's matchmaking (people or jobs), for conversational
+    continuity. ``summary`` is the anonymized human sentence the companion can recall;
+    ``counterpart_ref`` is an OPAQUE id of the other party (never a name) used by the
+    cross-service deletion/tombstone path — nullable for job events. Erased by Memory.delete."""
+
+    user_id: str
+    kind: SocialEventKind
+    summary: str  # anonymized, e.g. "alik introduced them to someone who loves pottery"
+    source: str  # which service recorded it: "connections" | "rendezvous" | "matching"
+    counterpart_ref: str | None = None  # opaque id of the other person (never their name)
+    created_at: datetime | None = None
     id: str = field(default_factory=lambda: uuid4().hex)
 
 

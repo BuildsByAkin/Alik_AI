@@ -22,6 +22,8 @@ from alik.models import (
     ProfileDimension,
     ProvenanceRecord,
     RetrievedContext,
+    SocialEvent,
+    SocialEventKind,
 )
 
 
@@ -191,6 +193,7 @@ class PgRedisMemory(Memory):
             await conn.execute("DELETE FROM pending_checkins WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM reflect_back_cooldown WHERE user_id = $1", user_id)
             await conn.execute("DELETE FROM profile_dimensions WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM social_events WHERE user_id = $1", user_id)
 
     # --- Phase 3: episodic lifecycle ------------------------------------------
 
@@ -488,3 +491,40 @@ class PgRedisMemory(Memory):
                 dimension,
                 session_id,
             )
+
+    # --- Phase 8: matchmaking write-back --------------------------------------
+
+    async def record_social_event(self, event: SocialEvent) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO social_events (user_id, kind, summary, source, counterpart_ref, "
+                "created_at) VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()))",
+                event.user_id,
+                str(event.kind),
+                event.summary,
+                event.source,
+                event.counterpart_ref,
+                event.created_at,
+            )
+
+    async def get_recent_social_events(
+        self, user_id: str, *, limit: int = 10
+    ) -> list[SocialEvent]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, kind, summary, source, counterpart_ref, created_at "
+                "FROM social_events WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+                user_id,
+                limit,
+            )
+        return [
+            SocialEvent(
+                user_id=r["user_id"],
+                kind=SocialEventKind(r["kind"]),
+                summary=r["summary"],
+                source=r["source"],
+                counterpart_ref=r["counterpart_ref"],
+                created_at=r["created_at"],
+            )
+            for r in rows
+        ]

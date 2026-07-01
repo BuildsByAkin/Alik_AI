@@ -495,6 +495,29 @@ class Companion:
                 f'this private note as the heart of it: "{hint}". End by gently seeing whether '
                 "they'd be open to meeting them — light and no-pressure, not a formal question."
             )
+        if checkin_type is CheckinType.RENDEZVOUS_PREF:
+            return (
+                "They were open to meeting someone; you're gently helping the two of them find a "
+                "time to meet — like a friend, never a scheduling app. Ask, lightly, roughly "
+                "WHERE and WHEN would work for them — a general area and a rough time, NEVER an "
+                "exact address. Keep the other person anonymous ('someone'/'they', never a name "
+                "or gender). Ground it in this private note: "
+                f'"{hint}". One or two sentences, warm, no pressure.'
+            )
+        if checkin_type is CheckinType.RENDEZVOUS_CONFIRM:
+            return (
+                "Relay, warmly and simply, the rough plan in this private note and check it works "
+                "for them — like passing along a friend's suggestion, not confirming a booking. "
+                "Keep the other person anonymous ('someone'/'they', never a name). Ground it in: "
+                f'"{hint}". One or two sentences, light, no pressure.'
+            )
+        if checkin_type is CheckinType.RENDEZVOUS_FOLLOWUP:
+            return (
+                "They recently met (or were about to meet) the person you introduced. Ask, warmly "
+                "and briefly, how it FELT — never whether they actually went. Keep the other "
+                "person anonymous ('someone'/'they', never a name). Work from this private note: "
+                f'"{hint}".'
+            )
         if checkin_type is CheckinType.JOB_RECOMMENDATION:
             return (
                 "Open this conversation yourself, warmly, like a friend who just spotted an "

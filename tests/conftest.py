@@ -33,6 +33,7 @@ from alik.models import (
     PendingCheckin,
     ProfileDimension,
     RetrievedContext,
+    SocialEvent,
     TraitStatus,
 )
 
@@ -115,6 +116,7 @@ class InMemoryMemory(Memory):
         self._checkins: list[PendingCheckin] = []  # Phase 5 queue
         self._rb_cooldown: dict[str, int] = {}  # Phase 5.2 reflect-back cadence
         self._dimensions: dict[tuple[str, str], ProfileDimension] = {}  # living-profile layer
+        self._social_events: dict[str, list[SocialEvent]] = {}  # Phase 8 matchmaking write-back
         self._reflection_after_days = reflection_after_days
 
     def _to_record(self, user_id: str, ep: dict) -> MemoryRecord:
@@ -184,6 +186,7 @@ class InMemoryMemory(Memory):
         self._checkins = [c for c in self._checkins if c.user_id != user_id]
         self._rb_cooldown.pop(user_id, None)
         self._dimensions = {k: v for k, v in self._dimensions.items() if k[0] != user_id}
+        self._social_events.pop(user_id, None)
         for key in [k for k in self._working if k[0] == user_id]:
             self._working.pop(key, None)
 
@@ -225,6 +228,22 @@ class InMemoryMemory(Memory):
 
     async def put_profile_dimension(self, dimension: ProfileDimension) -> None:
         self._dimensions[(dimension.user_id, dimension.dimension)] = dimension
+
+    # --- Phase 8: matchmaking write-back ----------------------------------
+
+    async def record_social_event(self, event: SocialEvent) -> None:
+        stamped = replace(event, created_at=event.created_at or datetime.now(UTC))
+        self._social_events.setdefault(event.user_id, []).append(stamped)
+
+    async def get_recent_social_events(
+        self, user_id: str, *, limit: int = 10
+    ) -> list[SocialEvent]:
+        events = sorted(
+            self._social_events.get(user_id, []),
+            key=lambda e: e.created_at or datetime.now(UTC),
+            reverse=True,
+        )
+        return events[:limit]
 
     async def get_dimension_to_confirm(
         self, user_id: str, session_id: str, *, min_confidence: float, min_observations: int

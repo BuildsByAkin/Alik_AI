@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS profile_dimensions (
 
 CREATE INDEX IF NOT EXISTS idx_profile_dim_user ON profile_dimensions (user_id);
 
+-- Phase 8 (matchmaking write-back): a durable, per-user log of alik's own matchmaking so the
+-- companion stays coherent ("did you ever meet that potter?"). The counterpart is referenced
+-- ONLY by an opaque id + an anonymized summary (never a name), so erasing this user leaks
+-- nothing about the other. Erased by Memory.delete.
+CREATE TABLE IF NOT EXISTS social_events (
+    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id        text        NOT NULL,
+    kind           text        NOT NULL,   -- people_introduced|people_accepted|meet_set|met|job_*
+    summary        text        NOT NULL,   -- anonymized human sentence the companion can recall
+    source         text        NOT NULL,   -- connections | rendezvous | matching
+    counterpart_ref text,                  -- opaque id of the other party (never a name); null for jobs
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_social_events_user ON social_events (user_id, created_at DESC);
+
 -- Job matching (recommendation log + engagement flag) moved OUT of the brain into the
 -- standalone matching microservice (services/matching), which owns its own Postgres.
 

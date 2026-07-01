@@ -35,6 +35,7 @@ from alik.models import (
     PendingCheckin,
     ProfileDimension,
     RetrievedContext,
+    SocialEvent,
     TraitStatus,
 )
 
@@ -677,6 +678,14 @@ class GraphMemory(Memory):
 
     async def mark_dimension_surfaced(self, user_id: str, dimension: str, session_id: str) -> None:
         await self._base.mark_dimension_surfaced(user_id, dimension, session_id)
+
+    # --- Phase 8: matchmaking write-back (delegates to the base store) ---------
+
+    async def record_social_event(self, event: SocialEvent) -> None:
+        await self._base.record_social_event(event)
+
+    async def get_recent_social_events(self, user_id: str, *, limit: int = 10) -> list[SocialEvent]:
+        return await self._base.get_recent_social_events(user_id, limit=limit)
 
     async def _current(self, user_id: str, node_type: NodeType) -> list[GraphNode]:
         if self._graph is None:

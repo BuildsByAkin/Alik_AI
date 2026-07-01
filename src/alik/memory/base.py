@@ -10,6 +10,7 @@ from alik.models import (
     PendingCheckin,
     ProfileDimension,
     RetrievedContext,
+    SocialEvent,
 )
 
 
@@ -154,3 +155,14 @@ class Memory(ABC):
     @abstractmethod
     async def mark_dimension_surfaced(self, user_id: str, dimension: str, session_id: str) -> None:
         """Record that we soft-confirmed this dimension in ``session_id``."""
+
+    # --- Phase 8: matchmaking write-back (social events) ----------------------
+
+    @abstractmethod
+    async def record_social_event(self, event: SocialEvent) -> None:
+        """Persist a durable, per-user matchmaking event (intro / accept / meet / job) so the
+        companion stays coherent about its own matchmaking. Erased by ``delete``."""
+
+    @abstractmethod
+    async def get_recent_social_events(self, user_id: str, *, limit: int = 10) -> list[SocialEvent]:
+        """The user's most recent social events, newest first."""
