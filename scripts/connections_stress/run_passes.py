@@ -39,7 +39,7 @@ async def _run() -> None:
     )
     try:
         print("\n--- PASS 1: ingest ---")
-        print(await run_ingest(store, brain, auth, settings))
+        print(await run_ingest(store, brain, auth, settings, llm))
         print("\n--- PASS 2: score ---")
         print(await scoring_pass(store, settings))
         print("\n--- PASS 3: eval (LLM) ---")

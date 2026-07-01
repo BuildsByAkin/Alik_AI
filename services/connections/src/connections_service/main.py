@@ -46,7 +46,10 @@ def _start_scheduler(app: FastAPI):
         return None
 
     async def _ingest_job() -> None:
-        await run_ingest(app.state.store, app.state.brain_client, app.state.auth_client, settings)
+        llm = app.state.llm if settings.interest_tagging_enabled else None
+        await run_ingest(
+            app.state.store, app.state.brain_client, app.state.auth_client, settings, llm
+        )
 
     async def _score_job() -> None:
         await scoring_pass(app.state.store, settings)

@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     dimension_confidence_floor: float = 0.6
     trait_confidence_floor: float = 0.7
 
+    # Semantic interest tagging: when true (and an API key is set), ingest classifies interests
+    # via the model (understands paraphrase/context) instead of keyword matching; it falls back
+    # to the deterministic keyword path on any failure. Reuses eval_model. Set false for the
+    # keyword-only path (no LLM in ingest).
+    interest_tagging_enabled: bool = True
+
     # Compatibility kernel (Part 3). Component weights are renormalized over present
     # components, so missing dimensions/values never cap the score.
     interest_weight: float = 0.5

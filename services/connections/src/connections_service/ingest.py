@@ -16,6 +16,7 @@ import logging
 import time
 
 from connections_service.config import Settings
+from connections_service.interest_tagger import tag_interests
 from connections_service.interests import all_interest_nodes, extract_interests
 from connections_service.models import DimensionSnapshot, UserPoolEntry
 from connections_service.passlog import emit_pass_summary
@@ -24,8 +25,11 @@ from connections_service.store import Store, now_utc
 logger = logging.getLogger("connections.ingest")
 
 
-async def run_ingest(store: Store, brain_client, auth_client, settings: Settings) -> dict[str, int]:
-    """Ingest every launch-state roster. Returns counts; never raises."""
+async def run_ingest(
+    store: Store, brain_client, auth_client, settings: Settings, llm=None
+) -> dict[str, int]:
+    """Ingest every launch-state roster. Returns counts; never raises. ``llm`` (optional) enables
+    semantic interest tagging — without it, ingest uses the deterministic keyword path."""
     counts = {"ingested": 0, "below_floor": 0, "skipped": 0}
     failures = 0  # summary-only; the returned counts dict stays stable for callers/tests.
     start = time.perf_counter()
@@ -34,7 +38,7 @@ async def run_ingest(store: Store, brain_client, auth_client, settings: Settings
             user_ids = await auth_client.list_user_ids(state)
             for user_id in user_ids:
                 try:
-                    counts[await _ingest_one(user_id, store, brain_client, settings)] += 1
+                    counts[await _ingest_one(user_id, store, brain_client, settings, llm)] += 1
                 except Exception:
                     failures += 1
                     logger.exception("connections ingest failed for user %s", user_id)
@@ -52,7 +56,9 @@ async def run_ingest(store: Store, brain_client, auth_client, settings: Settings
     return counts
 
 
-async def _ingest_one(user_id: str, store: Store, brain_client, settings: Settings) -> str:
+async def _ingest_one(
+    user_id: str, store: Store, brain_client, settings: Settings, llm=None
+) -> str:
     profile = await brain_client.fetch_profile(user_id)
     if profile is None:
         # Transport/5xx failure — keep the existing snapshot, retry next cycle.
@@ -61,7 +67,7 @@ async def _ingest_one(user_id: str, store: Store, brain_client, settings: Settin
 
     identity = profile.get("identity") or {}
     state = str(identity.get("state") or "").strip().upper()
-    edges = extract_interests(profile, trait_confidence_floor=settings.trait_confidence_floor)
+    edges = await _derive_interests(profile, settings, llm)
     dims = [
         DimensionSnapshot(
             dimension=str(d.get("dimension")),
@@ -88,6 +94,18 @@ async def _ingest_one(user_id: str, store: Store, brain_client, settings: Settin
     return "ingested" if pool_ready else "below_floor"
 
 
+async def _derive_interests(profile: dict, settings: Settings, llm) -> list:
+    """Interest edges for a profile: semantic LLM tagging when enabled + available, otherwise
+    (or on any tagging failure) the deterministic keyword path. Never raises."""
+    if llm is not None and settings.interest_tagging_enabled:
+        edges = await tag_interests(
+            llm, profile, trait_confidence_floor=settings.trait_confidence_floor
+        )
+        if edges is not None:
+            return edges  # includes a valid empty list (model saw no catalog interest)
+    return extract_interests(profile, trait_confidence_floor=settings.trait_confidence_floor)
+
+
 def _as_float(value: object) -> float:
     try:
         return float(value)  # type: ignore[arg-type]
@@ -102,6 +120,7 @@ def main() -> None:
     from connections_service.auth_client import AuthClient
     from connections_service.brain_client import BrainClient
     from connections_service.config import settings
+    from connections_service.llm import AnthropicLLM
     from connections_service.store import PgStore
 
     async def _run() -> None:
@@ -110,8 +129,18 @@ def main() -> None:
         await store.ensure_interest_nodes(all_interest_nodes())
         brain = BrainClient(base_url=settings.brain_url, service_token=token)
         auth = AuthClient(base_url=settings.auth_url, service_token=token)
+        # Reuse the eval model for semantic interest tagging (None disables -> keyword path).
+        llm = (
+            AnthropicLLM(
+                api_key=settings.anthropic_api_key.get_secret_value(),
+                model=settings.eval_model,
+                max_tokens=settings.eval_max_tokens,
+            )
+            if settings.interest_tagging_enabled and settings.anthropic_api_key.get_secret_value()
+            else None
+        )
         try:
-            await run_ingest(store, brain, auth, settings)
+            await run_ingest(store, brain, auth, settings, llm)
         finally:
             await brain.aclose()
             await auth.aclose()
