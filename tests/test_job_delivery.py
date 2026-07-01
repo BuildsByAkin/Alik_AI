@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Sequence
 
 from alik.companion import Companion
 from alik.memory.graph import GraphMemory
-from alik.models import CheckinType, PendingCheckin
+from alik.models import CheckinType, PendingCheckin, SocialEventKind
 from alik.prompt import JOB_OUTCOME_CLASSIFY_SYSTEM, load_persona
 from tests.conftest import FakeMatching, InMemoryGraphStore, InMemoryMemory
 
@@ -123,3 +123,34 @@ async def test_followup_loved_it_posts_outcome(user_id) -> None:
 
     await _consume(companion.respond(user_id, "S", "honestly I loved it, it's going great"))
     assert matching.outcomes == [(user_id, "r2", "loved_it")]
+
+
+async def test_delivery_records_job_recommended_memory(user_id) -> None:
+    # Symmetry with people-match: alik remembers its own job nudge.
+    mem = _mem()
+    await _queue_rec(mem, user_id)
+    matching = FakeMatching(open_rec={"recommendation_id": "r1", "partner_url": MINDRIFT_URL})
+    companion = _companion(mem, FakeJobLLM(), matching)
+
+    await companion.open_session(user_id, "S")
+    events = await mem.get_recent_social_events(user_id)
+    assert [e.kind for e in events] == [SocialEventKind.JOB_RECOMMENDED]
+    assert events[0].source == "matching" and events[0].counterpart_ref is None
+
+
+async def test_liked_outcome_records_job_liked_memory(user_id) -> None:
+    mem = _mem()
+    await mem.queue_checkin(
+        PendingCheckin(
+            user_id=user_id,
+            checkin_type=CheckinType.JOB_FOLLOWUP,
+            message_hint="Check in on how the Mindrift work went.",
+        )
+    )
+    matching = FakeMatching(pending={"recommendation_id": "r2"})
+    companion = _companion(mem, FakeJobLLM(outcome="loved_it"), matching)
+
+    await companion.open_session(user_id, "S")
+    await _consume(companion.respond(user_id, "S", "honestly I loved it, it's going great"))
+    kinds = [e.kind for e in await mem.get_recent_social_events(user_id)]
+    assert SocialEventKind.JOB_LIKED in kinds

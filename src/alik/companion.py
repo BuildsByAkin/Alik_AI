@@ -26,6 +26,8 @@ from alik.models import (
     MemoryTier,
     NodeType,
     ProvenanceRecord,
+    SocialEvent,
+    SocialEventKind,
     TraitStatus,
 )
 from alik.prompt import (
@@ -574,6 +576,16 @@ class Companion:
         open_rec = await self._matching.open_recommendation(user_id)
         if open_rec is not None:
             await self._matching.mark_delivered(open_rec["recommendation_id"])
+        # Remember alik's own job nudge (symmetry with people-match memories) so the companion
+        # can reference it later. Anonymized/no counterpart — a job, not a person.
+        await self._memory.record_social_event(
+            SocialEvent(
+                user_id=user_id,
+                kind=SocialEventKind.JOB_RECOMMENDED,
+                summary=f"alik suggested some paid work — {hint}",
+                source="matching",
+            )
+        )
         self._job_checkin[session_id] = {
             "type": "recommendation",
             "url": (open_rec or {}).get("partner_url") or self._extract_url(hint),
@@ -677,6 +689,14 @@ class Companion:
                 session_id,
                 "follow_through",
                 "Followed through on paid work alik suggested and it went well.",
+            )
+            await self._memory.record_social_event(
+                SocialEvent(
+                    user_id=user_id,
+                    kind=SocialEventKind.JOB_LIKED,
+                    summary="liked the paid work alik suggested",
+                    source="matching",
+                )
             )
         elif outcome is JobOutcome.TRIED_DISLIKED:
             await self._write_job_signal(
