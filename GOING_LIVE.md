@@ -1,6 +1,6 @@
 # Going live — operational checklist
 
-Read this top to bottom when you're ready to deploy. alik is **four services** that talk to
+Read this top to bottom when you're ready to deploy. alik is **five services** that talk to
 each other over HTTP:
 
 | Service | Path | Port | Datastore |
@@ -9,6 +9,7 @@ each other over HTTP:
 | Auth + profile (identity) | `services/auth/` | 8001 | Supabase (its own project) |
 | Job matching | `services/matching/` | 8002 | Postgres 5433 |
 | Connections (people matching) | `services/connections/` | 8003 | Postgres 5434 |
+| Rendezvous (meeting coordination) | `services/rendezvous/` | 8004 | Postgres 5435 |
 
 > Rule of thumb: each service has its **own venv and its own `.env`**. Run `uv sync` inside
 > each service directory before starting it.
@@ -22,18 +23,18 @@ each other over HTTP:
   ```bash
   python -c "import secrets; print(secrets.token_urlsafe(32))"
   ```
-  This same value goes in **all three** services (see step 2). Call it `<MESH_TOKEN>` below.
+  This same value goes in **all five** services (see step 2). Call it `<MESH_TOKEN>` below.
 
 ---
 
-## 1. Infrastructure (Postgres × 2, Redis, FalkorDB)
+## 1. Infrastructure (Postgres × 4, Redis, FalkorDB)
 - [ ] Start the datastores:
   ```bash
   docker compose up -d
   ```
-- [ ] Confirm all four are healthy:
+- [ ] Confirm they're all healthy:
   ```bash
-  docker compose ps        # postgres, redis, falkordb, matching-postgres all "healthy"
+  docker compose ps        # postgres, redis, falkordb, matching/connections/rendezvous-postgres "healthy"
   ```
   > Schemas are created automatically on first connect (each service runs its own
   > `schema.sql`) — you do **not** run migrations by hand for the brain or matching.
@@ -43,7 +44,7 @@ each other over HTTP:
 
 ## 2. Secrets & environment
 
-The mesh secret must be **identical** in all three services, or service-to-service calls
+The mesh secret must be **identical** in every service, or service-to-service calls
 return 401:
 
 | Service | Variable | Value |
@@ -52,6 +53,7 @@ return 401:
 | Auth | `SERVICE_TOKEN` | `<MESH_TOKEN>` |
 | Matching | `SERVICE_TOKEN` | `<MESH_TOKEN>` |
 | Connections | `SERVICE_TOKEN` | `<MESH_TOKEN>` |
+| Rendezvous | `SERVICE_TOKEN` | `<MESH_TOKEN>` |
 
 ### Brain — `.env` (prefix `ALIK_`)
 - [ ] `ALIK_ANTHROPIC_API_KEY` — **required** (the companion can't run without it).
@@ -64,6 +66,9 @@ return 401:
       matching** entirely — everything else still works)
 - [ ] `ALIK_CONNECTIONS_SERVICE_URL` — e.g. `http://localhost:8003` (leave **empty to disable
       people matching**; the brain's delete fan-out + checkin queueing then skip it)
+- [ ] `ALIK_RENDEZVOUS_SERVICE_URL` — e.g. `http://localhost:8004` (leave **empty to disable
+      meeting coordination**; the companion then never routes rendezvous replies and the delete
+      fan-out skips it)
 - [ ] (optional) `ALIK_COMPANION_MODEL`, `ALIK_EXTRACTION_MODEL`, `ALIK_PERSONA_PATH`
 
 ### Auth — `services/auth/.env` (`cp .env.example .env`)
@@ -84,8 +89,17 @@ return 401:
 - [ ] `SERVICE_TOKEN` — `<MESH_TOKEN>`
 - [ ] `ANTHROPIC_API_KEY` — **required for `eval_pass`** (its own key; confirm billing scope —
       separate from the brain's `ALIK_ANTHROPIC_API_KEY`)
+- [ ] `RENDEZVOUS_URL` — e.g. `http://localhost:8004` (where connections creates a meet when two
+      people mutually accept; empty disables the hand-off)
 - [ ] `PORT=8003`
 - [ ] (optional) `EVAL_MODEL`, the five `*_CRON` schedules, `MIN/MAX_GROUP_SIZE`, thresholds
+
+### Rendezvous — `services/rendezvous/.env` (`cp .env.example .env`)
+- [ ] `DATABASE_URL` — `postgresql://alik:alik@localhost:5435/rendezvous`
+- [ ] `BRAIN_URL` — `http://localhost:8000` (queues coordination check-ins + records social events)
+- [ ] `SERVICE_TOKEN` — `<MESH_TOKEN>`
+- [ ] `PORT=8004`
+- [ ] (optional) `ADVANCE_CRON` (default every 30 min — drives the meet lifecycle)
 
 ---
 
@@ -106,26 +120,30 @@ return 401:
 - [ ] `cd services/auth && uv sync`
 - [ ] `cd services/matching && uv sync`
 - [ ] `cd services/connections && uv sync`
+- [ ] `cd services/rendezvous && uv sync`
 
 ---
 
 ## 5. Start the services
-Bring up all four (order isn't strict — cross-service calls are made lazily and each service
+Bring up all five (order isn't strict — cross-service calls are made lazily and each service
 degrades gracefully if its peers are briefly unreachable):
 - [ ] Brain: `uv run uvicorn alik.api:app --port 8000`
 - [ ] Auth: `cd services/auth && uv run uvicorn auth_service.main:app --port 8001`
 - [ ] Matching: `cd services/matching && uv run uvicorn matching_service.main:app --port 8002`
 - [ ] Connections: `cd services/connections && uv run uvicorn connections_service.main:app --port 8003`
+- [ ] Rendezvous: `cd services/rendezvous && uv run uvicorn rendezvous_service.main:app --port 8004`
 
 ### Smoke test
 - [ ] `curl localhost:8000/...`  (brain has no /health; hit `/chat` or check logs start clean)
 - [ ] `curl localhost:8001/health`  → `{"status":"ok"}`
 - [ ] `curl localhost:8002/health`  → `{"status":"ok"}`
 - [ ] `curl localhost:8003/health`  → `{"status":"ok"}`
+- [ ] `curl localhost:8004/health`  → `{"status":"ok"}`
 - [ ] Mesh auth wired correctly (should be **401**, proving the guard is on):
   ```bash
   curl -s -o /dev/null -w "%{http_code}\n" localhost:8002/match/anyuser              # -> 401
   curl -s -o /dev/null -w "%{http_code}\n" -X DELETE localhost:8003/users/anyuser    # -> 401
+  curl -s -o /dev/null -w "%{http_code}\n" -X DELETE localhost:8004/users/anyuser    # -> 401
   ```
 
 ---
@@ -140,13 +158,15 @@ degrades gracefully if its peers are briefly unreachable):
       profile read will reject matching). The brain's profile guard is only enforced **when the
       token is set** — so an empty token silently disables the guard (fine for local dev, **not**
       for production).
-- [ ] **Ports must be distinct**: 8000/8001/8002/8003, Postgres 5432 (brain) / 5433 (matching)
-      / 5434 (connections), Redis 6379, FalkorDB 6380. The three Postgres instances are separate
-      on purpose.
-- [ ] **`delete()` is loud by design.** `DELETE /users/{id}` on the brain erases brain memory,
-      then auth, then matching, then connections. If any backend is unreachable it **raises**
-      rather than reporting partial success — re-run once everything is back; the ops are
-      idempotent. This is the right-to-erasure path; treat a failure as "not yet deleted."
+- [ ] **Ports must be distinct**: 8000/8001/8002/8003/8004, Postgres 5432 (brain) / 5433 (matching)
+      / 5434 (connections) / 5435 (rendezvous), Redis 6379, FalkorDB 6380. The four Postgres
+      instances are separate on purpose.
+- [ ] **`delete()` is loud by design.** `DELETE /users/{id}` on the brain erases brain memory
+      (incl. the Phase-8 `social_events`), then auth, then matching, then connections, then
+      rendezvous. If any backend is unreachable it **raises** rather than reporting partial
+      success — re-run once everything is back; the ops are idempotent. This is the
+      right-to-erasure path; treat a failure as "not yet deleted." (A rendezvous meet involves
+      two people; erasing one deletes the whole meet, so nothing about the erased user survives.)
 - [ ] **Nightly sleep pass + hourly proactivity** run via APScheduler inside the brain process
       (optional dep). Confirm `apscheduler` is installed (`uv sync` with the `scheduler` extra) if
       you rely on automatic nightly profile/job passes; otherwise trigger `uv run alik-sleep`
@@ -228,3 +248,27 @@ error never fails the pass). Read it three ways:
       hasn't run in the window (a cron that stopped firing). Alerts log at WARNING as
       `CONNECTIONS ALERT: …`; wire those to your pager/log alerting.
 - [ ] Tunables: `DIGEST_WINDOW_HOURS` (24), `EVAL_ERROR_RATE_THRESHOLD` (0.2), `DIGEST_CRON`.
+
+---
+
+## 10. Rendezvous service (meeting coordination) — extra launch steps
+
+The rendezvous service turns an accepted introduction into an actual meeting, then remembers
+how it went. It's driven by one recurring pass plus companion-delivered check-ins:
+
+- [ ] **The advance pass** (`rendezvous-advance` console script, or the in-process `ADVANCE_CRON`
+      job — default every 30 min) walks each active meet and queues the next coordination
+      check-in (pref → confirm → followup) via the brain. It's idempotent (per-stage asked-flags)
+      and brain-outage safe (never marks "asked" unless the brain accepted the check-in). Use
+      `uv sync --extra scheduler` for the in-process cron, or trigger the console script externally.
+- [ ] **A meet is created automatically** when two people MUTUALLY accept a connections intro
+      (connections POSTs `/meets`). Nothing to run — just confirm `RENDEZVOUS_URL` is set on the
+      connections service and `ALIK_RENDEZVOUS_SERVICE_URL` on the brain.
+- [ ] **Smoke-test the coordination openers in a real chat** — the "warm friend helping two
+      people meet, never a scheduling app" tone is the point and is hard to unit-test. The other
+      person stays anonymous ("someone who loves pottery"), and the MVP keeps *where/when* vague
+      (a free-text relay — no parsing yet; an LLM plan-negotiation step is the planned 8.1
+      fast-follow, see `docs/PHASE_8_RENDEZVOUS.md`).
+- [ ] **Matchmaking memories** land back in the brain (`social_events`): "arranged to meet
+      someone who loves pottery", "met …". They're per-user and anonymized, and erased by
+      `delete()`.
